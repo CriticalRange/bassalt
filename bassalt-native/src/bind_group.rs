@@ -19,6 +19,7 @@ pub enum BindingEntry {
     Texture {
         view_id: id::TextureViewId,
         sampler_id: Option<id::SamplerId>,
+        dimension: wgt::TextureViewDimension,
     },
     UniformBuffer {
         buffer_id: id::BufferId,
@@ -36,7 +37,10 @@ pub struct BindGroupBuilder {
 
 impl BindGroupBuilder {
     /// Create a new bind group builder
-    pub fn new(context: Arc<BasaltContext>, device_id: id::DeviceId) -> Self {
+    pub fn new(
+        context: Arc<BasaltContext>,
+        device_id: id::DeviceId,
+    ) -> Self {
         Self {
             context,
             device_id,
@@ -44,16 +48,17 @@ impl BindGroupBuilder {
         }
     }
 
-    /// Add a texture binding
+    /// Add a texture binding with explicit dimension
     pub fn add_texture(
         mut self,
         binding: u32,
         view_id: id::TextureViewId,
         sampler_id: Option<id::SamplerId>,
+        dimension: wgt::TextureViewDimension,
     ) -> Self {
         self.entries.push((
             binding,
-            BindingEntry::Texture { view_id, sampler_id },
+            BindingEntry::Texture { view_id, sampler_id, dimension },
         ));
         self
     }
@@ -79,77 +84,30 @@ impl BindGroupBuilder {
         self
     }
 
-    /// Build the bind group
-    ///
-    /// This creates both a bind group layout and the bind group itself.
-    /// The layout is created dynamically based on the provided entries.
+    /// Build the bind group, creating a layout based on actual bindings
     pub fn build(self) -> Result<id::BindGroupId> {
         let global = self.context.inner();
 
-        // Step 1: Create bind group layout entries
+        // First, create bind group layout based on the entries we have
         let mut layout_entries = Vec::new();
+        let mut bind_entries = Vec::new();
+
         for (binding, entry) in &self.entries {
             match entry {
-                BindingEntry::Texture { sampler_id, .. } => {
-                    // Texture binding
+                BindingEntry::Texture { view_id, sampler_id, dimension } => {
+                    // Add texture layout entry with actual dimension
                     layout_entries.push(wgt::BindGroupLayoutEntry {
                         binding: *binding,
-                        visibility: wgt::ShaderStages::FRAGMENT,
+                        visibility: wgt::ShaderStages::VERTEX | wgt::ShaderStages::FRAGMENT,
                         ty: wgt::BindingType::Texture {
                             sample_type: wgt::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgt::TextureViewDimension::D2,
+                            view_dimension: *dimension,
                             multisampled: false,
                         },
                         count: None,
                     });
 
-                    // If there's a sampler, add it as the next binding
-                    if sampler_id.is_some() {
-                        layout_entries.push(wgt::BindGroupLayoutEntry {
-                            binding: *binding + 1,
-                            visibility: wgt::ShaderStages::FRAGMENT,
-                            ty: wgt::BindingType::Sampler(wgt::SamplerBindingType::Filtering),
-                            count: None,
-                        });
-                    }
-                }
-                BindingEntry::UniformBuffer { .. } => {
-                    layout_entries.push(wgt::BindGroupLayoutEntry {
-                        binding: *binding,
-                        visibility: wgt::ShaderStages::VERTEX | wgt::ShaderStages::FRAGMENT,
-                        ty: wgt::BindingType::Buffer {
-                            ty: wgt::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    });
-                }
-            }
-        }
-
-        // Step 2: Create bind group layout
-        let layout_desc = binding_model::BindGroupLayoutDescriptor {
-            label: Some(Cow::Borrowed("Bassalt Dynamic Bind Group Layout")),
-            entries: Cow::Owned(layout_entries),
-        };
-
-        let (layout_id, layout_error) =
-            global.device_create_bind_group_layout(self.device_id, &layout_desc, None);
-
-        if let Some(e) = layout_error {
-            return Err(BasaltError::Device(format!(
-                "Failed to create bind group layout: {:?}",
-                e
-            )));
-        }
-
-        // Step 3: Create bind group entries
-        let mut bind_entries = Vec::new();
-        for (binding, entry) in &self.entries {
-            match entry {
-                BindingEntry::Texture { view_id, sampler_id } => {
-                    // Texture view binding
+                    // Add texture binding entry
                     bind_entries.push(binding_model::BindGroupEntry {
                         binding: *binding,
                         resource: binding_model::BindingResource::TextureView(*view_id),
@@ -157,6 +115,13 @@ impl BindGroupBuilder {
 
                     // Sampler binding (if present)
                     if let Some(sampler_id) = sampler_id {
+                        layout_entries.push(wgt::BindGroupLayoutEntry {
+                            binding: *binding + 1,
+                            visibility: wgt::ShaderStages::VERTEX | wgt::ShaderStages::FRAGMENT,
+                            ty: wgt::BindingType::Sampler(wgt::SamplerBindingType::Filtering),
+                            count: None,
+                        });
+
                         bind_entries.push(binding_model::BindGroupEntry {
                             binding: *binding + 1,
                             resource: binding_model::BindingResource::Sampler(*sampler_id),
@@ -168,6 +133,34 @@ impl BindGroupBuilder {
                     offset,
                     size,
                 } => {
+                    // WebGPU has a 64KB limit for uniform buffers
+                    // For larger buffers, use storage buffer with read_only access
+                    const MAX_UNIFORM_BUFFER_SIZE: u64 = 65536;
+                    let buffer_size = size.get();
+                    
+                    let buffer_binding_type = if buffer_size > MAX_UNIFORM_BUFFER_SIZE {
+                        log::debug!(
+                            "Buffer at binding {} is {} bytes, using storage buffer (limit: {})",
+                            binding, buffer_size, MAX_UNIFORM_BUFFER_SIZE
+                        );
+                        wgt::BufferBindingType::Storage { read_only: true }
+                    } else {
+                        wgt::BufferBindingType::Uniform
+                    };
+
+                    // Add buffer layout entry
+                    layout_entries.push(wgt::BindGroupLayoutEntry {
+                        binding: *binding,
+                        visibility: wgt::ShaderStages::VERTEX | wgt::ShaderStages::FRAGMENT,
+                        ty: wgt::BindingType::Buffer {
+                            ty: buffer_binding_type,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    });
+
+                    // Add buffer binding entry
                     bind_entries.push(binding_model::BindGroupEntry {
                         binding: *binding,
                         resource: binding_model::BindingResource::Buffer(
@@ -182,7 +175,26 @@ impl BindGroupBuilder {
             }
         }
 
-        // Step 4: Create bind group
+        // Create bind group layout
+        let layout_desc = binding_model::BindGroupLayoutDescriptor {
+            label: Some(Cow::Borrowed("Dynamic Bind Group Layout")),
+            entries: Cow::Owned(layout_entries),
+        };
+
+        let (layout_id, layout_error) = global.device_create_bind_group_layout(
+            self.device_id,
+            &layout_desc,
+            None,
+        );
+
+        if let Some(e) = layout_error {
+            return Err(BasaltError::Device(format!(
+                "Failed to create bind group layout: {:?}",
+                e
+            )));
+        }
+
+        // Create bind group using the dynamically created layout
         let bind_group_desc = binding_model::BindGroupDescriptor {
             label: Some(Cow::Borrowed("Bassalt Dynamic Bind Group")),
             layout: layout_id,

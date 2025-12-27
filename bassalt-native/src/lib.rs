@@ -71,6 +71,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltBackend_cre
     _class: JClass,
     context_ptr: jlong,
     window_ptr: jlong,
+    display_ptr: jlong,
     width: jint,
     height: jint,
 ) -> jlong {
@@ -86,7 +87,13 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltBackend_cre
     let context_clone = context.clone();
     std::mem::forget(context); // Don't drop, we still own the reference
 
-    match device::create_device_from_window(context_clone, window_ptr as u64, width as u32, height as u32) {
+    match device::create_device_from_window(
+        context_clone,
+        window_ptr as u64,
+        display_ptr as u64,
+        width as u32,
+        height as u32
+    ) {
         Ok(device) => {
             info!("Device created successfully");
             Box::into_raw(Box::new(device)) as jlong
@@ -527,8 +534,13 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
         usage as u32,
     ) {
         Ok(texture_id) => {
-            let handle = HANDLES.insert_texture(texture_id);
-            log::debug!("Created texture with handle {} ({}x{})", handle, width, height);
+            // Store texture with array layer info for view dimension detection
+            let handle = HANDLES.insert_texture(
+                texture_id,
+                depth as u32,
+                wgt::TextureDimension::D2, // All our textures are 2D for now
+            );
+            log::debug!("Created texture with handle {} ({}x{}x{})", handle, width, height, depth);
             handle as jlong
         }
         Err(e) => {
@@ -573,19 +585,20 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
 
     let device = unsafe { &*(device_ptr as *const BasaltDevice) };
 
-    // Look up texture ID from handle
-    let texture_id = match HANDLES.get_texture(texture_handle as u64) {
-        Some(id) => id,
+    // Look up texture info from handle (including array layers)
+    let texture_info = match HANDLES.get_texture_info(texture_handle as u64) {
+        Some(info) => info,
         None => {
             let _ = env.throw_new("java/lang/IllegalArgumentException", "Invalid texture handle");
             return 0;
         }
     };
 
-    match device.create_texture_view(texture_id) {
-        Ok(view_id) => {
-            let handle = HANDLES.insert_texture_view(view_id);
-            log::debug!("Created texture view with handle {} for texture {}", handle, texture_handle);
+    match device.create_texture_view(texture_info.id, texture_info.array_layers) {
+        Ok((view_id, dimension)) => {
+            let handle = HANDLES.insert_texture_view(view_id, dimension);
+            log::debug!("Created texture view with handle {} (dimension={:?}, layers={}) for texture {}", 
+                       handle, dimension, texture_info.array_layers, texture_handle);
             handle as jlong
         }
         Err(e) => {
@@ -650,6 +663,9 @@ fn create_vertex_buffer_layout(format_index: usize) -> Cow<'static, [wgpu_core::
     use std::borrow::Cow;
 
     match format_index {
+        // 255 = EMPTY (no vertex input - shader uses @builtin(vertex_index))
+        // Used by shaders like rendertype_clouds that generate geometry procedurally
+        255 => Cow::Borrowed(&[]),
         // 0 = POSITION (3 floats)
         0 => Cow::Owned(vec![wgpu_core::pipeline::VertexBufferLayout {
             array_stride: 12, // 3 floats * 4 bytes
@@ -864,6 +880,127 @@ fn create_vertex_buffer_layout(format_index: usize) -> Cow<'static, [wgpu_core::
     }
 }
 
+/// Helper function to create a bind group layout from shader reflection
+fn create_layout_from_shaders(
+    context: &Arc<BasaltContext>,
+    device_id: wgpu_core::id::DeviceId,
+    vertex_module: &naga::Module,
+    fragment_module: &naga::Module,
+) -> Result<(wgpu_core::id::BindGroupLayoutId, wgpu_core::id::PipelineLayoutId), BasaltError> {
+    use std::collections::BTreeMap;
+    use std::borrow::Cow;
+    use wgpu_core::binding_model;
+
+    // Collect all bindings from both shaders
+    let mut bindings: BTreeMap<u32, wgt::BindGroupLayoutEntry> = BTreeMap::new();
+
+    // Helper to extract bindings from a module
+    let mut extract_bindings = |module: &naga::Module, stage: wgt::ShaderStages| {
+        for (_handle, global_var) in module.global_variables.iter() {
+            if let Some(binding) = &global_var.binding {
+                // Only process group 0 bindings (Minecraft uses group 0)
+                if binding.group == 0 {
+                    let ty = &module.types[global_var.ty];
+
+                    let binding_type = match global_var.space {
+                        naga::AddressSpace::Uniform => {
+                            wgt::BindingType::Buffer {
+                                ty: wgt::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            }
+                        }
+                        naga::AddressSpace::Handle => {
+                            // Check if it's a texture or sampler
+                            match &ty.inner {
+                                naga::TypeInner::Image { dim, arrayed, class: _ } => {
+                                    // Convert naga dimension to wgpu dimension
+                                    let view_dimension = match (dim, arrayed) {
+                                        (naga::ImageDimension::D1, false) => wgt::TextureViewDimension::D1,
+                                        (naga::ImageDimension::D2, false) => wgt::TextureViewDimension::D2,
+                                        (naga::ImageDimension::D2, true) => wgt::TextureViewDimension::D2Array,
+                                        (naga::ImageDimension::D3, _) => wgt::TextureViewDimension::D3,
+                                        (naga::ImageDimension::Cube, false) => wgt::TextureViewDimension::Cube,
+                                        (naga::ImageDimension::Cube, true) => wgt::TextureViewDimension::CubeArray,
+                                        _ => wgt::TextureViewDimension::D2, // Default fallback
+                                    };
+                                    log::debug!("Found texture at binding {}: dimension {:?}", binding.binding, view_dimension);
+                                    wgt::BindingType::Texture {
+                                        sample_type: wgt::TextureSampleType::Float { filterable: true },
+                                        view_dimension,
+                                        multisampled: false,
+                                    }
+                                }
+                                naga::TypeInner::Sampler { .. } => {
+                                    wgt::BindingType::Sampler(wgt::SamplerBindingType::Filtering)
+                                }
+                                _ => continue, // Skip unsupported types
+                            }
+                        }
+                        _ => continue, // Skip other address spaces
+                    };
+
+                    // Always use VERTEX | FRAGMENT for maximum compatibility
+                    // (even if shader only uses it in one stage)
+                    let visibility = wgt::ShaderStages::VERTEX | wgt::ShaderStages::FRAGMENT;
+
+                    bindings.entry(binding.binding)
+                        .and_modify(|e| e.visibility |= visibility)
+                        .or_insert(wgt::BindGroupLayoutEntry {
+                            binding: binding.binding,
+                            visibility,
+                            ty: binding_type,
+                            count: None,
+                        });
+                }
+            }
+        }
+    };
+
+    // Extract bindings from both shaders
+    extract_bindings(vertex_module, wgt::ShaderStages::VERTEX);
+    extract_bindings(fragment_module, wgt::ShaderStages::FRAGMENT);
+
+    // Create bind group layout entries vector (sorted by binding number)
+    let layout_entries: Vec<wgt::BindGroupLayoutEntry> = bindings.into_values().collect();
+
+    log::debug!("Creating pipeline layout with {} bindings", layout_entries.len());
+
+    // Create bind group layout
+    let bgl_desc = binding_model::BindGroupLayoutDescriptor {
+        label: Some(Cow::Borrowed("Pipeline Bind Group Layout")),
+        entries: Cow::Owned(layout_entries),
+    };
+
+    let global = context.inner();
+    let (bgl_id, bgl_error) = global.device_create_bind_group_layout(device_id, &bgl_desc, None);
+
+    if let Some(e) = bgl_error {
+        return Err(BasaltError::Device(format!(
+            "Failed to create bind group layout: {:?}",
+            e
+        )));
+    }
+
+    // Create pipeline layout
+    let pl_desc = binding_model::PipelineLayoutDescriptor {
+        label: Some(Cow::Borrowed("Pipeline Layout")),
+        bind_group_layouts: Cow::Owned(vec![bgl_id]),
+        push_constant_ranges: Cow::Borrowed(&[]),
+    };
+
+    let (pl_id, pl_error) = global.device_create_pipeline_layout(device_id, &pl_desc, None);
+
+    if let Some(e) = pl_error {
+        return Err(BasaltError::Device(format!(
+            "Failed to create pipeline layout: {:?}",
+            e
+        )));
+    }
+
+    Ok((bgl_id, pl_id))
+}
+
 /// Create a render pipeline from pre-converted WGSL shaders
 #[no_mangle]
 pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_createNativePipelineFromWgsl(
@@ -945,7 +1082,21 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
         }
     };
 
-    // Use the device ID from the existing device - DO NOT create a new device!
+    // Create pipeline layout from shader reflection
+    let (bind_group_layout_id, pipeline_layout_id) = match create_layout_from_shaders(
+        device_context,
+        device_id,
+        &vertex_module,
+        &fragment_module,
+    ) {
+        Ok(layouts) => layouts,
+        Err(e) => {
+            let msg = format!("Failed to create pipeline layout from shaders: {:?}", e);
+            log::error!("{}", msg);
+            let _ = env.throw_new("java/lang/RuntimeException", &msg);
+            return 0;
+        }
+    };
 
     // Create shader modules
     let vs_desc = pipeline::ShaderModuleDescriptor {
@@ -1046,10 +1197,13 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
         None
     };
 
-    // Create render pipeline descriptor
+    // Use the pipeline layout created from shader reflection
+    // (pipeline_layout_id is already set above from create_layout_from_shaders)
+
+    // Create render pipeline descriptor with the reflected layout
     let pipeline_desc = pipeline::RenderPipelineDescriptor {
         label: Some(Cow::Borrowed("Basalt Render Pipeline")),
-        layout: None,
+        layout: Some(pipeline_layout_id),
         vertex: pipeline::VertexState {
             stage: pipeline::ProgrammableStageDescriptor {
                 module: vertex_shader_id,
@@ -1401,7 +1555,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
     let context = device.context().clone();
     let device_id = device.id();
 
-    // Create bind group builder
+    // Create bind group builder (it will create its own layout based on bindings)
     let mut builder = bind_group::BindGroupBuilder::new(context, device_id);
     let mut binding_slot = 0u32;
 
@@ -1421,7 +1575,8 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
             if env.get_long_array_region(&tex_array, i as i32, &mut tex_handle_buf).is_ok() {
                 let tex_handle = tex_handle_buf[0];
                 if tex_handle != 0 {
-                    if let Some(view_id) = HANDLES.get_texture_view(tex_handle as u64) {
+                    // Get texture view info which includes the dimension
+                    if let Some(view_info) = HANDLES.get_texture_view_info(tex_handle as u64) {
                         // Get sampler handle (if available)
                         let mut samp_handle_buf = [0i64; 1];
                         let sampler_id = if env.get_long_array_region(&samp_array, i as i32, &mut samp_handle_buf).is_ok() {
@@ -1435,7 +1590,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
                             None
                         };
 
-                        builder = builder.add_texture(binding_slot, view_id, sampler_id);
+                        builder = builder.add_texture(binding_slot, view_info.id, sampler_id, view_info.dimension);
                         binding_slot += if sampler_id.is_some() { 2 } else { 1 };
                     }
                 }
@@ -1507,6 +1662,183 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
     } else {
         log::warn!("setBindGroup: invalid bind group handle {}", bind_group_handle);
         log::debug!("Bind group set (placeholder implementation)");
+    }
+}
+
+// ============================================================================
+// CLEAR OPERATIONS
+// ============================================================================
+
+/// Clear a color texture
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltCommandEncoder_clearColorTexture0(
+    mut env: JNIEnv,
+    _class: JClass,
+    device_ptr: jlong,
+    texture_handle: jlong,
+    clear_color: jint,
+) {
+    if device_ptr == 0 || texture_handle == 0 {
+        let _ = env.throw_new("java/lang/IllegalArgumentException", "Null pointer");
+        return;
+    }
+
+    let device = unsafe { &*(device_ptr as *const BasaltDevice) };
+
+    // Look up texture ID
+    let texture_id = match HANDLES.get_texture(texture_handle as u64) {
+        Some(id) => id,
+        None => {
+            let _ = env.throw_new("java/lang/IllegalArgumentException", "Invalid texture handle");
+            return;
+        }
+    };
+
+    // Convert clear color from packed RGBA to Color struct
+    let r = ((clear_color >> 24) & 0xFF) as f64 / 255.0;
+    let g = ((clear_color >> 16) & 0xFF) as f64 / 255.0;
+    let b = ((clear_color >> 8) & 0xFF) as f64 / 255.0;
+    let a = (clear_color & 0xFF) as f64 / 255.0;
+    let color = wgt::Color { r, g, b, a };
+
+    // Create a command encoder and clear the texture
+    if let Err(e) = device.clear_texture(texture_id, Some(color), None) {
+        let _ = env.throw_new("java/lang/RuntimeException", &format!("Failed to clear color texture: {}", e));
+    }
+}
+
+/// Clear a depth texture
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltCommandEncoder_clearDepthTexture0(
+    mut env: JNIEnv,
+    _class: JClass,
+    device_ptr: jlong,
+    texture_handle: jlong,
+    clear_depth: jfloat,
+) {
+    if device_ptr == 0 || texture_handle == 0 {
+        let _ = env.throw_new("java/lang/IllegalArgumentException", "Null pointer");
+        return;
+    }
+
+    let device = unsafe { &*(device_ptr as *const BasaltDevice) };
+
+    // Look up texture ID
+    let texture_id = match HANDLES.get_texture(texture_handle as u64) {
+        Some(id) => id,
+        None => {
+            let _ = env.throw_new("java/lang/IllegalArgumentException", "Invalid texture handle");
+            return;
+        }
+    };
+
+    // Clear depth texture
+    if let Err(e) = device.clear_texture(texture_id, None, Some(clear_depth)) {
+        let _ = env.throw_new("java/lang/RuntimeException", &format!("Failed to clear depth texture: {}", e));
+    }
+}
+
+/// Clear both color and depth textures (with region support)
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltCommandEncoder_clearColorAndDepthTextures0(
+    mut env: JNIEnv,
+    _class: JClass,
+    device_ptr: jlong,
+    color_texture_handle: jlong,
+    clear_color: jint,
+    depth_texture_handle: jlong,
+    clear_depth: jfloat,
+    _x: jint,
+    _y: jint,
+    _width: jint,
+    _height: jint,
+) {
+    if device_ptr == 0 {
+        let _ = env.throw_new("java/lang/IllegalArgumentException", "Null device pointer");
+        return;
+    }
+
+    let device = unsafe { &*(device_ptr as *const BasaltDevice) };
+
+    // Clear color texture if provided
+    if color_texture_handle != 0 {
+        if let Some(color_id) = HANDLES.get_texture(color_texture_handle as u64) {
+            let r = ((clear_color >> 24) & 0xFF) as f64 / 255.0;
+            let g = ((clear_color >> 16) & 0xFF) as f64 / 255.0;
+            let b = ((clear_color >> 8) & 0xFF) as f64 / 255.0;
+            let a = (clear_color & 0xFF) as f64 / 255.0;
+            let color = wgt::Color { r, g, b, a };
+
+            if let Err(e) = device.clear_texture(color_id, Some(color), None) {
+                let _ = env.throw_new("java/lang/RuntimeException", &format!("Failed to clear color texture: {}", e));
+                return;
+            }
+        }
+    }
+
+    // Clear depth texture if provided
+    if depth_texture_handle != 0 {
+        if let Some(depth_id) = HANDLES.get_texture(depth_texture_handle as u64) {
+            if let Err(e) = device.clear_texture(depth_id, None, Some(clear_depth)) {
+                let _ = env.throw_new("java/lang/RuntimeException", &format!("Failed to clear depth texture: {}", e));
+                return;
+            }
+        }
+    }
+}
+
+/// Copy texture to texture
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltCommandEncoder_copyTextureToTexture0(
+    mut env: JNIEnv,
+    _class: JClass,
+    device_ptr: jlong,
+    src_texture_handle: jlong,
+    dst_texture_handle: jlong,
+    mip_level: jint,
+    dest_x: jint,
+    dest_y: jint,
+    source_x: jint,
+    source_y: jint,
+    width: jint,
+    height: jint,
+) {
+    if device_ptr == 0 || src_texture_handle == 0 || dst_texture_handle == 0 {
+        let _ = env.throw_new("java/lang/IllegalArgumentException", "Null pointer");
+        return;
+    }
+
+    let device = unsafe { &*(device_ptr as *const BasaltDevice) };
+
+    // Look up texture IDs
+    let src_id = match HANDLES.get_texture(src_texture_handle as u64) {
+        Some(id) => id,
+        None => {
+            let _ = env.throw_new("java/lang/IllegalArgumentException", "Invalid source texture handle");
+            return;
+        }
+    };
+
+    let dst_id = match HANDLES.get_texture(dst_texture_handle as u64) {
+        Some(id) => id,
+        None => {
+            let _ = env.throw_new("java/lang/IllegalArgumentException", "Invalid destination texture handle");
+            return;
+        }
+    };
+
+    if let Err(e) = device.copy_texture_to_texture(
+        src_id,
+        dst_id,
+        mip_level as u32,
+        dest_x as u32,
+        dest_y as u32,
+        source_x as u32,
+        source_y as u32,
+        width as u32,
+        height as u32,
+    ) {
+        let _ = env.throw_new("java/lang/RuntimeException", &format!("Failed to copy texture: {}", e));
     }
 }
 

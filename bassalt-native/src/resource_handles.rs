@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::RwLock;
 use wgpu_core::id;
+use wgpu_types;
 
 /// Buffer info stored alongside ID
 #[derive(Debug, Clone, Copy)]
@@ -16,12 +17,27 @@ pub struct BufferInfo {
     pub size: u64,
 }
 
+/// Texture view info stored alongside ID
+#[derive(Debug, Clone, Copy)]
+pub struct TextureViewInfo {
+    pub id: id::TextureViewId,
+    pub dimension: wgpu_types::TextureViewDimension,
+}
+
+/// Texture info stored alongside ID
+#[derive(Debug, Clone, Copy)]
+pub struct TextureInfo {
+    pub id: id::TextureId,
+    pub array_layers: u32,
+    pub dimension: wgpu_types::TextureDimension,
+}
+
 /// Thread-safe handle store for wgpu resources
 pub struct ResourceHandleStore {
     next_handle: AtomicU64,
     buffers: RwLock<HashMap<u64, BufferInfo>>,
-    textures: RwLock<HashMap<u64, id::TextureId>>,
-    texture_views: RwLock<HashMap<u64, id::TextureViewId>>,
+    textures: RwLock<HashMap<u64, TextureInfo>>,
+    texture_views: RwLock<HashMap<u64, TextureViewInfo>>,
     samplers: RwLock<HashMap<u64, id::SamplerId>>,
     bind_groups: RwLock<HashMap<u64, id::BindGroupId>>,
     bind_group_layouts: RwLock<HashMap<u64, id::BindGroupLayoutId>>,
@@ -69,33 +85,52 @@ impl ResourceHandleStore {
     }
 
     // Texture operations
-    pub fn insert_texture(&self, texture_id: id::TextureId) -> u64 {
+    pub fn insert_texture(
+        &self,
+        texture_id: id::TextureId,
+        array_layers: u32,
+        dimension: wgpu_types::TextureDimension,
+    ) -> u64 {
         let handle = self.next();
-        self.textures.write().insert(handle, texture_id);
+        let info = TextureInfo { id: texture_id, array_layers, dimension };
+        self.textures.write().insert(handle, info);
         handle
     }
 
     pub fn get_texture(&self, handle: u64) -> Option<id::TextureId> {
+        self.textures.read().get(&handle).map(|info| info.id)
+    }
+
+    pub fn get_texture_info(&self, handle: u64) -> Option<TextureInfo> {
         self.textures.read().get(&handle).copied()
     }
 
     pub fn remove_texture(&self, handle: u64) -> Option<id::TextureId> {
-        self.textures.write().remove(&handle)
+        self.textures.write().remove(&handle).map(|info| info.id)
     }
 
     // Texture view operations
-    pub fn insert_texture_view(&self, view_id: id::TextureViewId) -> u64 {
+    pub fn insert_texture_view(
+        &self,
+        view_id: id::TextureViewId,
+        dimension: wgpu_types::TextureViewDimension,
+    ) -> u64 {
         let handle = self.next();
-        self.texture_views.write().insert(handle, view_id);
+        let info = TextureViewInfo { id: view_id, dimension };
+        self.texture_views.write().insert(handle, info);
         handle
     }
 
     pub fn get_texture_view(&self, handle: u64) -> Option<id::TextureViewId> {
+        self.texture_views.read().get(&handle).map(|info| info.id)
+    }
+
+    pub fn get_texture_view_info(&self, handle: u64) -> Option<TextureViewInfo> {
         self.texture_views.read().get(&handle).copied()
     }
 
     pub fn remove_texture_view(&self, handle: u64) -> Option<id::TextureViewId> {
-        self.texture_views.write().remove(&handle)
+        self.texture_views.write().remove(&handle).map(|info| info.id)
     }
 
     // Sampler operations

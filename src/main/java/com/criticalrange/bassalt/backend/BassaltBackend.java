@@ -191,7 +191,7 @@ public class BassaltBackend extends GlBackend {
 
     // Native method declarations
     private static native long init();
-    private static native long createDevice(long contextPtr, long windowPtr, int width, int height);
+    private static native long createDevice(long contextPtr, long windowPtr, long displayPtr, int width, int height);
     private static native String getAdapterInfo(long contextPtr);
 
     private final long contextPtr;
@@ -234,8 +234,33 @@ public class BassaltBackend extends GlBackend {
             throw new BackendCreationException("Failed to create GLFW window");
         }
 
+        // Get the native display and window handles from GLFW
+        // Try Wayland first, then X11
+        long displayPtr = 0;
+        long nativeWindowPtr = window; // Default to GLFW window pointer
+
+        try {
+            // Try X11 first (more common with XWayland)
+            displayPtr = org.lwjgl.glfw.GLFWNativeX11.glfwGetX11Display();
+            nativeWindowPtr = org.lwjgl.glfw.GLFWNativeX11.glfwGetX11Window(window);
+            System.out.println("[Bassalt] Using X11 - display: " + displayPtr + ", window: " + nativeWindowPtr);
+        } catch (Throwable e) {
+            try {
+                // Fall back to Wayland if X11 fails
+                displayPtr = org.lwjgl.glfw.GLFWNativeWayland.glfwGetWaylandDisplay();
+                nativeWindowPtr = org.lwjgl.glfw.GLFWNativeWayland.glfwGetWaylandWindow(window);
+                System.out.println("[Bassalt] Using Wayland - display: " + displayPtr + ", surface: " + nativeWindowPtr);
+            } catch (Throwable e2) {
+                System.err.println("[Bassalt] Warning: Could not get native display handle");
+                System.err.println("[Bassalt] X11 error: " + e.getMessage());
+                System.err.println("[Bassalt] Wayland error: " + e2.getMessage());
+                displayPtr = 0;
+                nativeWindowPtr = window;
+            }
+        }
+
         // Create the device
-        long devicePtr = createDevice(contextPtr, window, width, height);
+        long devicePtr = createDevice(contextPtr, nativeWindowPtr, displayPtr, width, height);
         if (devicePtr == 0) {
             GLFW.glfwDestroyWindow(window);
             throw new BackendCreationException("Failed to create Bassalt device");

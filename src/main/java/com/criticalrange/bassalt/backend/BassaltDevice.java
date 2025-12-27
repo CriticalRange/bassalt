@@ -343,8 +343,8 @@ public class BassaltDevice implements GpuDevice {
         if (name.startsWith("vertexformat[") && name.endsWith("]")) {
             String elements = name.substring(13, name.length() - 1); // Extract "position, color, ..."
             if (elements.isEmpty()) {
-                System.err.println("[Bassalt] Empty vertex format, defaulting to position");
-                return 0;
+                System.out.println("[Bassalt] Empty vertex format - using vertex_index mode (255)");
+                return 255; // EMPTY - shader uses @builtin(vertex_index)
             }
 
             String[] parts = elements.split(",\\s*");

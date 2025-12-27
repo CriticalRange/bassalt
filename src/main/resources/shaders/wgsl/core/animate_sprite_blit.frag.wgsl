@@ -1,14 +1,18 @@
 // Animate sprite blit fragment shader
 // Converted from animate_sprite_blit.fsh
+// Uses bindings 2 and 3 to avoid conflict with vertex shader's uniform at binding 0
+// Input matches animate_sprite.vert.wgsl outputs
 
 struct FragmentInput {
-    @location(0) tex_coord0: vec2<f32>,
+    // Match vertex shader outputs:
+    @location(0) animation_progress: f32,  // Unused but must match VS output
+    @location(1) tex_coord0: vec2<f32>,
 }
 
-@group(0) @binding(0)
+@group(0) @binding(2)
 var sprite_texture: texture_2d<f32>;
 
-@group(0) @binding(1)
+@group(0) @binding(3)
 var sprite_sampler: sampler;
 
 @fragment

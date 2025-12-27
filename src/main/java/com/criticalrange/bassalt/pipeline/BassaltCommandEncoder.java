@@ -43,6 +43,14 @@ public class BassaltCommandEncoder implements CommandEncoder {
                                               long srcOffset, long dstOffset, long size);
     private static native void copyTextureToBuffer0(long devicePtr, long texturePtr, long bufferPtr,
                                                      long bufferOffset, int mipLevel, int width, int height);
+    private static native void clearColorTexture0(long devicePtr, long texturePtr, int clearColor);
+    private static native void clearDepthTexture0(long devicePtr, long texturePtr, float clearDepth);
+    private static native void clearColorAndDepthTextures0(long devicePtr, long colorTexturePtr, int clearColor,
+                                                           long depthTexturePtr, float clearDepth,
+                                                           int x, int y, int width, int height);
+    private static native void copyTextureToTexture0(long devicePtr, long srcTexturePtr, long dstTexturePtr,
+                                                      int mipLevel, int destX, int destY, int sourceX, int sourceY,
+                                                      int width, int height);
 
     public BassaltCommandEncoder(BassaltDevice device) {
         this.device = device;
@@ -200,24 +208,32 @@ public class BassaltCommandEncoder implements CommandEncoder {
 
     @Override
     public void clearColorTexture(GpuTexture texture, int clearColor) {
-        // TODO: implement color texture clear using wgpu's clear_color_texture
+        long texturePtr = ((BassaltTexture) texture).getNativePtr();
+        clearColorTexture0(device.getNativePtr(), texturePtr, clearColor);
     }
 
     @Override
     public void clearDepthTexture(GpuTexture texture, double depth) {
-        // TODO: implement depth texture clear using wgpu's clear_depth_texture
+        long texturePtr = ((BassaltTexture) texture).getNativePtr();
+        clearDepthTexture0(device.getNativePtr(), texturePtr, (float) depth);
     }
 
     @Override
     public void clearColorAndDepthTextures(GpuTexture colorTexture, int clearColor, GpuTexture depthTexture,
                                            double clearDepth) {
-        // TODO: implement combined color/depth clear (no region)
+        long colorPtr = ((BassaltTexture) colorTexture).getNativePtr();
+        long depthPtr = ((BassaltTexture) depthTexture).getNativePtr();
+        clearColorAndDepthTextures0(device.getNativePtr(), colorPtr, clearColor, depthPtr, (float) clearDepth,
+                                     0, 0, colorTexture.getWidth(0), colorTexture.getHeight(0));
     }
 
     @Override
     public void clearColorAndDepthTextures(GpuTexture colorTexture, int clearColor, GpuTexture depthTexture,
                                            double clearDepth, int x, int y, int width, int height) {
-        // TODO: implement combined color/depth clear (with region)
+        long colorPtr = ((BassaltTexture) colorTexture).getNativePtr();
+        long depthPtr = ((BassaltTexture) depthTexture).getNativePtr();
+        clearColorAndDepthTextures0(device.getNativePtr(), colorPtr, clearColor, depthPtr, (float) clearDepth,
+                                     x, y, width, height);
     }
 
     @Override
@@ -338,7 +354,10 @@ public class BassaltCommandEncoder implements CommandEncoder {
         int width,
         int height
     ) {
-        // TODO: implement texture-to-texture copy using wgpu's copy_texture_to_texture
+        long srcPtr = ((BassaltTexture) source).getNativePtr();
+        long dstPtr = ((BassaltTexture) destination).getNativePtr();
+        copyTextureToTexture0(device.getNativePtr(), srcPtr, dstPtr,
+                               mipLevel, destX, destY, sourceX, sourceY, width, height);
     }
 
     public void finish() {

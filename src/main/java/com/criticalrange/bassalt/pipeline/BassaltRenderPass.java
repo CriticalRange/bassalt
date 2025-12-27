@@ -43,7 +43,7 @@ public class BassaltRenderPass implements RenderPass {
     private RenderPipeline currentPipeline;
 
     // Native methods for bind group management
-    private static native long createBindGroup0(long devicePtr, long pipelinePtr,
+    private static native long createBindGroup0(long devicePtr, long renderPassPtr,
                                                  String[] textureNames, long[] textures, long[] samplers,
                                                  String[] uniformNames, long[] uniforms);
     private static native void setBindGroup0(long devicePtr, long renderPassPtr,
