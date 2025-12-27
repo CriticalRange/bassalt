@@ -33,6 +33,10 @@ smallvec = "1.11"
 lazy_static = "1.4"
 hashbrown = "0.16"
 
+# macOS-specific dependencies
+[target.'cfg(target_os = "macos")'.dependencies]
+dispatch = "0.2"
+
 [features]
 default = ["vulkan", "glsl", "wgsl"]
 

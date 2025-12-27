@@ -15,10 +15,12 @@ import java.io.InputStream;
 /**
  * Bassalt Renderer Backend - WebGPU-based implementation for Minecraft Fabric
  *
- * This backend uses a native Rust library (wgpu-core) to provide hardware-accelerated
+ * This backend uses a native Rust library (wgpu-core) to provide
+ * hardware-accelerated
  * rendering through WebGPU APIs (Vulkan, DX12, Metal).
  *
- * Note: Extends GlBackend to satisfy Mixin @Redirect type requirements, but completely
+ * Note: Extends GlBackend to satisfy Mixin @Redirect type requirements, but
+ * completely
  * overrides all behavior with wgpu-based implementation.
  */
 @Environment(EnvType.CLIENT)
@@ -46,8 +48,8 @@ public class BassaltBackend extends GlBackend {
 
                 // Try multiple possible locations
                 String[] resourcePaths = {
-                    "/META-INF/native/" + libName,
-                    "/native/" + libName
+                        "/META-INF/native/" + libName,
+                        "/native/" + libName
                 };
 
                 for (String resourcePath : resourcePaths) {
@@ -57,7 +59,8 @@ public class BassaltBackend extends GlBackend {
                             // Extract and load from temp file
                             File temp = File.createTempFile(libName, ".tmp");
                             temp.deleteOnExit();
-                            java.nio.file.Files.copy(in, temp.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                            java.nio.file.Files.copy(in, temp.toPath(),
+                                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
                             System.load(temp.getAbsolutePath());
                             loaded = true;
                             System.out.println("[Bassalt] Native library loaded from: " + resourcePath);
@@ -76,17 +79,18 @@ public class BassaltBackend extends GlBackend {
                     System.out.println("[Bassalt] Also trying with underscore: " + libNameUnderscore);
 
                     String[] devPaths = {
-                        "bassalt-native/target/release/" + libName,
-                        "bassalt-native/target/release/" + libNameUnderscore,
-                        "../bassalt-native/target/release/" + libName,
-                        "../bassalt-native/target/release/" + libNameUnderscore,
-                        "../../bassalt-native/target/release/" + libName,
-                        "../../bassalt-native/target/release/" + libNameUnderscore
+                            "bassalt-native/target/release/" + libName,
+                            "bassalt-native/target/release/" + libNameUnderscore,
+                            "../bassalt-native/target/release/" + libName,
+                            "../bassalt-native/target/release/" + libNameUnderscore,
+                            "../../bassalt-native/target/release/" + libName,
+                            "../../bassalt-native/target/release/" + libNameUnderscore
                     };
 
                     for (String devPath : devPaths) {
                         File libFile = new File(devPath);
-                        System.out.println("[Bassalt] Checking path: " + libFile.getAbsolutePath() + " exists: " + libFile.exists());
+                        System.out.println("[Bassalt] Checking path: " + libFile.getAbsolutePath() + " exists: "
+                                + libFile.exists());
                         if (libFile.exists()) {
                             System.out.println("[Bassalt] Found library at dev path: " + libFile.getAbsolutePath());
                             System.load(libFile.getAbsolutePath());
@@ -191,7 +195,9 @@ public class BassaltBackend extends GlBackend {
 
     // Native method declarations
     private static native long init();
+
     private static native long createDevice(long contextPtr, long windowPtr, long displayPtr, int width, int height);
+
     private static native String getAdapterInfo(long contextPtr);
 
     private final long contextPtr;
@@ -205,7 +211,8 @@ public class BassaltBackend extends GlBackend {
             throw new RuntimeException("Failed to initialize Bassalt renderer");
         }
         // TODO: getAdapterInfo is temporarily disabled due to JNI linking issue
-        // System.out.println("[Bassalt] Backend initialized: " + getAdapterInfo(contextPtr));
+        // System.out.println("[Bassalt] Backend initialized: " +
+        // getAdapterInfo(contextPtr));
         System.out.println("[Bassalt] Backend initialized successfully (contextPtr: " + contextPtr + ")");
     }
 
@@ -216,13 +223,12 @@ public class BassaltBackend extends GlBackend {
 
     @Override
     public WindowAndDevice createDeviceWithWindow(
-        int width,
-        int height,
-        String title,
-        long monitor,
-        ShaderSource defaultShaderSource,
-        GpuDebugOptions debugOptions
-    ) throws BackendCreationException {
+            int width,
+            int height,
+            String title,
+            long monitor,
+            ShaderSource defaultShaderSource,
+            GpuDebugOptions debugOptions) throws BackendCreationException {
         // Create a GLFW window without an OpenGL context
         GLFW.glfwDefaultWindowHints();
         GLFW.glfwWindowHint(GLFW.GLFW_CLIENT_API, GLFW.GLFW_NO_API);
@@ -235,27 +241,42 @@ public class BassaltBackend extends GlBackend {
         }
 
         // Get the native display and window handles from GLFW
-        // Try Wayland first, then X11
         long displayPtr = 0;
         long nativeWindowPtr = window; // Default to GLFW window pointer
 
-        try {
-            // Try X11 first (more common with XWayland)
-            displayPtr = org.lwjgl.glfw.GLFWNativeX11.glfwGetX11Display();
-            nativeWindowPtr = org.lwjgl.glfw.GLFWNativeX11.glfwGetX11Window(window);
-            System.out.println("[Bassalt] Using X11 - display: " + displayPtr + ", window: " + nativeWindowPtr);
-        } catch (Throwable e) {
+        // Detect platform and get native handles
+        String osName = System.getProperty("os.name").toLowerCase();
+
+        if (osName.contains("mac")) {
+            // macOS: Get the NSView pointer for Metal
             try {
-                // Fall back to Wayland if X11 fails
-                displayPtr = org.lwjgl.glfw.GLFWNativeWayland.glfwGetWaylandDisplay();
-                nativeWindowPtr = org.lwjgl.glfw.GLFWNativeWayland.glfwGetWaylandWindow(window);
-                System.out.println("[Bassalt] Using Wayland - display: " + displayPtr + ", surface: " + nativeWindowPtr);
-            } catch (Throwable e2) {
-                System.err.println("[Bassalt] Warning: Could not get native display handle");
-                System.err.println("[Bassalt] X11 error: " + e.getMessage());
-                System.err.println("[Bassalt] Wayland error: " + e2.getMessage());
-                displayPtr = 0;
+                nativeWindowPtr = org.lwjgl.glfw.GLFWNativeCocoa.glfwGetCocoaWindow(window);
+                System.out.println("[Bassalt] Using macOS Cocoa - window: " + nativeWindowPtr);
+            } catch (Throwable e) {
+                System.err.println("[Bassalt] Warning: Could not get macOS Cocoa window handle: " + e.getMessage());
                 nativeWindowPtr = window;
+            }
+        } else {
+            // Linux: Try X11 first, then Wayland
+            try {
+                // Try X11 first (more common with XWayland)
+                displayPtr = org.lwjgl.glfw.GLFWNativeX11.glfwGetX11Display();
+                nativeWindowPtr = org.lwjgl.glfw.GLFWNativeX11.glfwGetX11Window(window);
+                System.out.println("[Bassalt] Using X11 - display: " + displayPtr + ", window: " + nativeWindowPtr);
+            } catch (Throwable e) {
+                try {
+                    // Fall back to Wayland if X11 fails
+                    displayPtr = org.lwjgl.glfw.GLFWNativeWayland.glfwGetWaylandDisplay();
+                    nativeWindowPtr = org.lwjgl.glfw.GLFWNativeWayland.glfwGetWaylandWindow(window);
+                    System.out.println(
+                            "[Bassalt] Using Wayland - display: " + displayPtr + ", surface: " + nativeWindowPtr);
+                } catch (Throwable e2) {
+                    System.err.println("[Bassalt] Warning: Could not get native display handle");
+                    System.err.println("[Bassalt] X11 error: " + e.getMessage());
+                    System.err.println("[Bassalt] Wayland error: " + e2.getMessage());
+                    displayPtr = 0;
+                    nativeWindowPtr = window;
+                }
             }
         }
 

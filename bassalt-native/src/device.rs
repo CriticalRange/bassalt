@@ -1618,6 +1618,53 @@ pub fn create_device_from_window(
     };
 
     // Create surface from window handles
+    // On macOS, Metal surface creation MUST happen on the main thread
+    #[cfg(target_os = "macos")]
+    let surface_id = {
+        use std::sync::Mutex as StdMutex;
+        use std::sync::Arc as StdArc;
+        
+        // We need to dispatch to the main thread on macOS
+        let result: StdArc<StdMutex<Option<std::result::Result<id::SurfaceId, wgpu_core::instance::CreateSurfaceError>>>> = 
+            StdArc::new(StdMutex::new(None));
+        
+        let result_clone = StdArc::clone(&result);
+        let context_clone = context.clone();
+        // Capture only the window_ptr (which is Send), not the handles
+        let window_ptr_copy = window_ptr;
+        
+        // Dispatch synchronously to the main queue
+        dispatch::Queue::main().exec_sync(move || {
+            use raw_window_handle::{AppKitWindowHandle, AppKitDisplayHandle, RawWindowHandle, RawDisplayHandle};
+            use std::ptr::NonNull;
+            
+            // Reconstruct handles on the main thread
+            let window_handle = AppKitWindowHandle::new(NonNull::new(window_ptr_copy as *mut _).unwrap());
+            let display_handle = AppKitDisplayHandle::new();
+            let raw_window_handle = RawWindowHandle::AppKit(window_handle);
+            let raw_display_handle = RawDisplayHandle::AppKit(display_handle);
+            
+            let surface_result = unsafe {
+                context_clone.inner().instance_create_surface(
+                    raw_display_handle,
+                    raw_window_handle,
+                    None,
+                )
+            };
+            
+            *result_clone.lock().unwrap() = Some(surface_result);
+        });
+        
+        // Extract the result
+        let final_result = result.lock().unwrap();
+        match final_result.as_ref().unwrap() {
+            Ok(id) => *id,
+            Err(e) => return Err(BasaltError::Surface(format!("Failed to create surface: {:?}", e))),
+        }
+    };
+    
+    // On other platforms, create surface directly
+    #[cfg(not(target_os = "macos"))]
     let surface_id = unsafe {
         context.inner().instance_create_surface(
             raw_display_handle,
