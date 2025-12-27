@@ -18,6 +18,7 @@ mod command;
 mod error;
 mod resource_handles;
 mod render_pass;
+mod bind_group;
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -373,8 +374,8 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
 
     match device.create_buffer(size as u64, usage as u32) {
         Ok(buffer_id) => {
-            // Store the buffer ID and return a handle
-            let handle = HANDLES.insert_buffer(buffer_id);
+            // Store the buffer ID and size, return a handle
+            let handle = HANDLES.insert_buffer(buffer_id, size as u64);
             log::debug!("Created buffer with handle {} (size={})", handle, size);
             handle as jlong
         }
@@ -419,9 +420,9 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
                 let _ = env.throw_new("java/lang/RuntimeException", &format!("Failed to write initial buffer data: {}", e));
                 return 0;
             }
-            
-            // Store the buffer ID and return a handle
-            let handle = HANDLES.insert_buffer(buffer_id);
+
+            // Store the buffer ID and size, return a handle
+            let handle = HANDLES.insert_buffer(buffer_id, size);
             log::debug!("Created buffer with handle {} (size={}, with data)", handle, size);
             handle as jlong
         }
@@ -744,6 +745,97 @@ fn create_vertex_buffer_layout(format_index: usize) -> Cow<'static, [wgpu_core::
                 },
             ]),
         }]),
+        // 5 = POSITION_COLOR_TEX (3 floats + 4 floats + 2 floats)
+        5 => Cow::Owned(vec![wgpu_core::pipeline::VertexBufferLayout {
+            array_stride: 36, // 12 + 16 + 8 = 36 bytes
+            step_mode: wgt::VertexStepMode::Vertex,
+            attributes: Cow::Owned(vec![
+                wgt::VertexAttribute {
+                    format: wgt::VertexFormat::Float32x3,
+                    offset: 0,
+                    shader_location: 0, // position
+                },
+                wgt::VertexAttribute {
+                    format: wgt::VertexFormat::Float32x4,
+                    offset: 12,
+                    shader_location: 1, // color
+                },
+                wgt::VertexAttribute {
+                    format: wgt::VertexFormat::Float32x2,
+                    offset: 28,
+                    shader_location: 2, // uv
+                },
+            ]),
+        }]),
+        // 6 = POSITION_COLOR_TEX_TEX_TEX_NORMAL (position, color, uv0, uv1, uv2, normal)
+        6 => Cow::Owned(vec![wgpu_core::pipeline::VertexBufferLayout {
+            array_stride: 64, // 12 + 16 + 8 + 8 + 8 + 12 = 64 bytes
+            step_mode: wgt::VertexStepMode::Vertex,
+            attributes: Cow::Owned(vec![
+                wgt::VertexAttribute {
+                    format: wgt::VertexFormat::Float32x3,
+                    offset: 0,
+                    shader_location: 0, // position
+                },
+                wgt::VertexAttribute {
+                    format: wgt::VertexFormat::Float32x4,
+                    offset: 12,
+                    shader_location: 1, // color
+                },
+                wgt::VertexAttribute {
+                    format: wgt::VertexFormat::Float32x2,
+                    offset: 28,
+                    shader_location: 2, // uv0
+                },
+                wgt::VertexAttribute {
+                    format: wgt::VertexFormat::Float32x2,
+                    offset: 36,
+                    shader_location: 3, // uv1
+                },
+                wgt::VertexAttribute {
+                    format: wgt::VertexFormat::Float32x2,
+                    offset: 44,
+                    shader_location: 4, // uv2
+                },
+                wgt::VertexAttribute {
+                    format: wgt::VertexFormat::Float32x3,
+                    offset: 52,
+                    shader_location: 5, // normal
+                },
+            ]),
+        }]),
+        // 7 = POSITION_COLOR_TEX_TEX_NORMAL (position, color, uv0, uv2, normal - skips uv1)
+        7 => Cow::Owned(vec![wgpu_core::pipeline::VertexBufferLayout {
+            array_stride: 56, // 12 + 16 + 8 + 8 + 12 = 56 bytes
+            step_mode: wgt::VertexStepMode::Vertex,
+            attributes: Cow::Owned(vec![
+                wgt::VertexAttribute {
+                    format: wgt::VertexFormat::Float32x3,
+                    offset: 0,
+                    shader_location: 0, // position
+                },
+                wgt::VertexAttribute {
+                    format: wgt::VertexFormat::Float32x4,
+                    offset: 12,
+                    shader_location: 1, // color
+                },
+                wgt::VertexAttribute {
+                    format: wgt::VertexFormat::Float32x2,
+                    offset: 28,
+                    shader_location: 2, // uv0
+                },
+                wgt::VertexAttribute {
+                    format: wgt::VertexFormat::Float32x2,
+                    offset: 36,
+                    shader_location: 3, // uv2
+                },
+                wgt::VertexAttribute {
+                    format: wgt::VertexFormat::Float32x3,
+                    offset: 44,
+                    shader_location: 4, // normal
+                },
+            ]),
+        }]),
         // Default to POSITION_TEX_COLOR for unknown formats
         _ => {
             log::warn!("Unknown vertex format index: {}, defaulting to POSITION_TEX_COLOR", format_index);
@@ -777,7 +869,7 @@ fn create_vertex_buffer_layout(format_index: usize) -> Cow<'static, [wgpu_core::
 pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_createNativePipelineFromWgsl(
     mut env: JNIEnv,
     _class: JClass,
-    _device_ptr: jlong,
+    device_ptr: jlong,
     vertex_shader: JString,
     fragment_shader: JString,
     _vertex_format: jint,
@@ -793,14 +885,16 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
     use wgpu_core::pipeline;
     use naga::front;
 
-    // Get the global device context
-    let device_context = match GLOBAL_CONTEXT.get() {
-        Some(ctx) => ctx,
-        None => {
-            let _ = env.throw_new("java/lang/IllegalStateException", "Device not initialized");
-            return 0;
-        }
-    };
+    // Validate device pointer
+    if device_ptr == 0 {
+        let _ = env.throw_new("java/lang/IllegalArgumentException", "Null device pointer");
+        return 0;
+    }
+
+    // Get the device from the pointer - use the SAME device that was created during initialization
+    let device = unsafe { &*(device_ptr as *const BasaltDevice) };
+    let device_context = device.context();
+    let device_id = device.id();
 
     // Check for null shaders
     if vertex_shader.is_null() {
@@ -851,28 +945,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
         }
     };
 
-    // Get the device and queue IDs (assuming single device for now)
-    let adapters = device_context.inner().enumerate_adapters(wgt::Backends::all());
-    let adapter_id = match adapters.first() {
-        Some(id) => *id,
-        None => {
-            let _ = env.throw_new("java/lang/RuntimeException", "No adapter available");
-            return 0;
-        }
-    };
-
-    // Get or create device
-    let device_desc = wgt::DeviceDescriptor::default();
-    let (device_id, queue_id) = match device_context.inner()
-        .adapter_request_device(adapter_id, &device_desc, None, None) {
-        Ok(ids) => ids,
-        Err(e) => {
-            let msg = format!("Failed to get device: {:?}", e);
-            log::error!("{}", msg);
-            let _ = env.throw_new("java/lang/RuntimeException", &msg);
-            return 0;
-        }
-    };
+    // Use the device ID from the existing device - DO NOT create a new device!
 
     // Create shader modules
     let vs_desc = pipeline::ShaderModuleDescriptor {
@@ -1002,7 +1075,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
             conservative: false,
         },
         depth_stencil: Some(wgt::DepthStencilState {
-            format: wgt::TextureFormat::Depth24PlusStencil8,
+            format: wgt::TextureFormat::Depth32Float,
             depth_write_enabled: depth_write_enabled != 0,
             depth_compare: if depth_test_enabled != 0 { depth_compare } else { wgt::CompareFunction::Always },
             stencil: wgt::StencilState::default(),
@@ -1017,7 +1090,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
                 zero_initialize_workgroup_memory: true,
             },
             targets: Cow::Owned(vec![Some(wgt::ColorTargetState {
-                format: wgt::TextureFormat::Bgra8UnormSrgb,
+                format: wgt::TextureFormat::Rgba8UnormSrgb,
                 blend: blend_state,
                 write_mask: wgt::ColorWrites::ALL,
             })]),
@@ -1120,17 +1193,14 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_setP
         return;
     }
 
-    // Look up pipeline ID
-    let _pipeline_id = if pipeline_handle != 0 {
-        HANDLES.get_render_pipeline(pipeline_handle as u64)
-    } else {
-        None
-    };
+    let state = unsafe { &mut *(render_pass_ptr as *mut render_pass::RenderPassState) };
 
-    // Note: In wgpu-core 27, setting pipeline on a render pass requires
-    // the actual render pass object, not just the command encoder.
-    // This needs proper render pass begin/end API integration.
-    log::debug!("setPipeline called (pass={}, pipeline={})", render_pass_ptr, pipeline_handle);
+    if let Some(pipeline_id) = HANDLES.get_render_pipeline(pipeline_handle as u64) {
+        state.record_set_pipeline(pipeline_id);
+        log::debug!("Recorded setPipeline (pipeline={})", pipeline_handle);
+    } else {
+        log::error!("Invalid pipeline handle: {}", pipeline_handle);
+    }
 }
 
 /// Set vertex buffer
@@ -1148,14 +1218,15 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_setV
         return;
     }
 
-    let _buffer_id = if buffer_handle != 0 {
-        HANDLES.get_buffer(buffer_handle as u64)
-    } else {
-        None
-    };
+    let state = unsafe { &mut *(render_pass_ptr as *mut render_pass::RenderPassState) };
 
-    log::debug!("setVertexBuffer called (pass={}, slot={}, buffer={}, offset={})", 
-        render_pass_ptr, slot, buffer_handle, offset);
+    if let Some(buffer_id) = HANDLES.get_buffer(buffer_handle as u64) {
+        state.record_set_vertex_buffer(slot as u32, buffer_id, offset as u64, None);
+        log::debug!("Recorded setVertexBuffer (slot={}, buffer={}, offset={})",
+            slot, buffer_handle, offset);
+    } else {
+        log::error!("Invalid buffer handle: {}", buffer_handle);
+    }
 }
 
 /// Set index buffer
@@ -1173,14 +1244,24 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_setI
         return;
     }
 
-    let _buffer_id = if buffer_handle != 0 {
-        HANDLES.get_buffer(buffer_handle as u64)
-    } else {
-        None
+    let state = unsafe { &mut *(render_pass_ptr as *mut render_pass::RenderPassState) };
+
+    let index_format = match index_type {
+        0 => wgt::IndexFormat::Uint16,
+        1 => wgt::IndexFormat::Uint32,
+        _ => {
+            log::error!("Invalid index type: {}", index_type);
+            return;
+        }
     };
 
-    log::debug!("setIndexBuffer called (pass={}, buffer={}, type={}, offset={})", 
-        render_pass_ptr, buffer_handle, index_type, offset);
+    if let Some(buffer_id) = HANDLES.get_buffer(buffer_handle as u64) {
+        state.record_set_index_buffer(buffer_id, index_format, offset as u64, None);
+        log::debug!("Recorded setIndexBuffer (buffer={}, type={}, offset={})",
+            buffer_handle, index_type, offset);
+    } else {
+        log::error!("Invalid buffer handle: {}", buffer_handle);
+    }
 }
 
 /// Draw indexed
@@ -1200,8 +1281,71 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_draw
         return;
     }
 
-    log::debug!("drawIndexed called (pass={}, indices={}, instances={}, first={}, base={}, firstInst={})", 
-        render_pass_ptr, index_count, instance_count, first_index, base_vertex, first_instance);
+    let state = unsafe { &mut *(render_pass_ptr as *mut render_pass::RenderPassState) };
+
+    state.record_draw_indexed(
+        index_count as u32,
+        instance_count as u32,
+        first_index as u32,
+        base_vertex,
+        first_instance as u32,
+    );
+
+    log::debug!("Recorded drawIndexed (indices={}, instances={}, first={}, base={}, firstInst={})",
+        index_count, instance_count, first_index, base_vertex, first_instance);
+}
+
+/// Draw (non-indexed)
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_draw(
+    _env: JNIEnv,
+    _class: JClass,
+    _device_ptr: jlong,
+    render_pass_ptr: jlong,
+    vertex_count: jint,
+    instance_count: jint,
+    first_vertex: jint,
+    first_instance: jint,
+) {
+    if render_pass_ptr == 0 {
+        return;
+    }
+
+    let state = unsafe { &mut *(render_pass_ptr as *mut render_pass::RenderPassState) };
+
+    state.record_draw(
+        vertex_count as u32,
+        instance_count as u32,
+        first_vertex as u32,
+        first_instance as u32,
+    );
+
+    log::debug!("Recorded draw (vertices={}, instances={}, first={}, firstInst={})",
+        vertex_count, instance_count, first_vertex, first_instance);
+}
+
+/// Set scissor rect
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_setScissorRect(
+    _env: JNIEnv,
+    _class: JClass,
+    _device_ptr: jlong,
+    render_pass_ptr: jlong,
+    x: jint,
+    y: jint,
+    width: jint,
+    height: jint,
+) {
+    if render_pass_ptr == 0 {
+        return;
+    }
+
+    let state = unsafe { &mut *(render_pass_ptr as *mut render_pass::RenderPassState) };
+
+    state.record_set_scissor_rect(x as u32, y as u32, width as u32, height as u32);
+
+    log::debug!("Recorded setScissorRect (x={}, y={}, width={}, height={})",
+        x, y, width, height);
 }
 
 /// End render pass and submit
@@ -1236,38 +1380,107 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_endR
 // ============================================================================
 
 /// Create a bind group from arrays of texture, sampler, and uniform bindings
-///
-/// This is a VERY simplified placeholder that returns a dummy handle.
-/// A full implementation would:
-/// 1. Parse the arrays to extract binding information
-/// 2. Create a bind group layout matching shader expectations
-/// 3. Create bind group entries with actual resources
-/// 4. Create the bind group with wgpu
 #[no_mangle]
 pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass_createBindGroup0(
     mut env: JNIEnv,
     _class: JClass,
     device_ptr: jlong,
     _render_pass_ptr: jlong,
-    _texture_names: JObject,
-    _texture_handles: JObject,
-    _sampler_handles: JObject,
-    _uniform_names: JObject,
-    _uniform_handles: JObject,
+    texture_names: JObject,
+    texture_handles: JObject,
+    sampler_handles: JObject,
+    uniform_names: JObject,
+    uniform_handles: JObject,
 ) -> jlong {
-    use ::jni::objects::JObject;
-
     if device_ptr == 0 {
         let _ = env.throw_new("java/lang/IllegalArgumentException", "Null device pointer");
         return 0;
     }
 
-    // For now, just return a dummy non-zero handle
-    // TODO: Implement proper bind group creation with actual resource binding
-    log::debug!("createBindGroup called (returning dummy handle)");
+    let device = unsafe { &*(device_ptr as *const device::BasaltDevice) };
+    let context = device.context().clone();
+    let device_id = device.id();
 
-    // Return a non-zero dummy handle (1 is our first valid handle)
-    1 as jlong
+    // Create bind group builder
+    let mut builder = bind_group::BindGroupBuilder::new(context, device_id);
+    let mut binding_slot = 0u32;
+
+    // Add texture bindings
+    if !texture_handles.is_null() {
+        let tex_array: ::jni::objects::JPrimitiveArray<i64> = texture_handles.into();
+        let samp_array: ::jni::objects::JPrimitiveArray<i64> = sampler_handles.into();
+
+        let texture_count = match env.get_array_length(&tex_array) {
+            Ok(len) => len as usize,
+            Err(_) => 0,
+        };
+
+        for i in 0..texture_count {
+            // Get texture handle
+            let mut tex_handle_buf = [0i64; 1];
+            if env.get_long_array_region(&tex_array, i as i32, &mut tex_handle_buf).is_ok() {
+                let tex_handle = tex_handle_buf[0];
+                if tex_handle != 0 {
+                    if let Some(view_id) = HANDLES.get_texture_view(tex_handle as u64) {
+                        // Get sampler handle (if available)
+                        let mut samp_handle_buf = [0i64; 1];
+                        let sampler_id = if env.get_long_array_region(&samp_array, i as i32, &mut samp_handle_buf).is_ok() {
+                            let samp_handle = samp_handle_buf[0];
+                            if samp_handle != 0 {
+                                HANDLES.get_sampler(samp_handle as u64)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+
+                        builder = builder.add_texture(binding_slot, view_id, sampler_id);
+                        binding_slot += if sampler_id.is_some() { 2 } else { 1 };
+                    }
+                }
+            }
+        }
+    }
+
+    // Add uniform buffer bindings
+    if !uniform_handles.is_null() {
+        let unif_array: ::jni::objects::JPrimitiveArray<i64> = uniform_handles.into();
+
+        let uniform_count = match env.get_array_length(&unif_array) {
+            Ok(len) => len as usize,
+            Err(_) => 0,
+        };
+
+        for i in 0..uniform_count {
+            let mut unif_handle_buf = [0i64; 1];
+            if env.get_long_array_region(&unif_array, i as i32, &mut unif_handle_buf).is_ok() {
+                let unif_handle = unif_handle_buf[0];
+                if unif_handle != 0 {
+                    if let Some(buffer_info) = HANDLES.get_buffer_info(unif_handle as u64) {
+                        // Bind entire buffer (offset=0, size=whole buffer)
+                        // TODO: Support buffer slices with offset/size from UniformBinding
+                        builder = builder.add_uniform_buffer(binding_slot, buffer_info.id, 0, buffer_info.size);
+                        binding_slot += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // Build the bind group
+    match builder.build() {
+        Ok(bind_group_id) => {
+            let handle = HANDLES.insert_bind_group(bind_group_id);
+            log::debug!("Created bind group with {} bindings (handle={})", binding_slot, handle);
+            handle as jlong
+        }
+        Err(e) => {
+            log::error!("Failed to create bind group: {:?}", e);
+            let _ = env.throw_new("java/lang/RuntimeException", format!("Failed to create bind group: {:?}", e));
+            0
+        }
+    }
 }
 
 /// Set a bind group on the render pass
@@ -1277,19 +1490,22 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
     _class: JClass,
     _device_ptr: jlong,
     render_pass_ptr: jlong,
-    _index: jint,
+    index: jint,
     bind_group_handle: jlong,
 ) {
     if render_pass_ptr == 0 || bind_group_handle == 0 {
         return;
     }
 
-    log::debug!("setBindGroup called: pass={}, bind_group={}", render_pass_ptr, bind_group_handle);
+    let state = unsafe { &mut *(render_pass_ptr as *mut render_pass::RenderPassState) };
 
     // Look up bind group ID
-    if let Some(_bind_group_id) = crate::HANDLES.get_bind_group(bind_group_handle as u64) {
-        // TODO: Actually set the bind group on the render pass
-        // This requires getting the render pass's command encoder and calling set_bind_group
+    if let Some(bind_group_id) = HANDLES.get_bind_group(bind_group_handle as u64) {
+        // Record the set bind group command
+        state.record_set_bind_group(index as u32, Some(bind_group_id), Vec::new());
+        log::debug!("Recorded setBindGroup (index={}, bind_group={})", index, bind_group_handle);
+    } else {
+        log::warn!("setBindGroup: invalid bind group handle {}", bind_group_handle);
         log::debug!("Bind group set (placeholder implementation)");
     }
 }

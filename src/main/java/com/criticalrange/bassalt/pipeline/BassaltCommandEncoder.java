@@ -72,9 +72,14 @@ public class BassaltCommandEncoder implements CommandEncoder {
         // Get native pointers from texture views
         long colorPtr = 0;
         long depthPtr = 0;
+        int width = 854;  // Default fallback
+        int height = 480; // Default fallback
 
         if (colorTexture instanceof com.criticalrange.bassalt.texture.BassaltTextureView) {
             colorPtr = ((com.criticalrange.bassalt.texture.BassaltTextureView) colorTexture).getNativePtr();
+            // Get actual dimensions from the texture
+            width = colorTexture.texture().getWidth(0);
+            height = colorTexture.texture().getHeight(0);
         }
         if (depthTexture instanceof com.criticalrange.bassalt.texture.BassaltTextureView) {
             depthPtr = ((com.criticalrange.bassalt.texture.BassaltTextureView) depthTexture).getNativePtr();
@@ -83,7 +88,6 @@ public class BassaltCommandEncoder implements CommandEncoder {
         int clear = clearColor.orElse(0xFF000000); // Opaque black default
         float depthVal = (float) clearDepth.orElse(1.0);
 
-        // TODO: get proper width/height from textures
         currentRenderPass = device.beginRenderPass(
             device.getNativePtr(),
             colorPtr,
@@ -91,8 +95,8 @@ public class BassaltCommandEncoder implements CommandEncoder {
             clear,
             depthVal,
             0,
-            1920,
-            1080
+            width,
+            height
         );
 
         isActive = true;

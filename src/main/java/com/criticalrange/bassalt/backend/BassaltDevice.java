@@ -78,7 +78,7 @@ public class BassaltDevice implements GpuDevice {
     public static native long beginRenderPass(long ptr, long colorTexture, long depthTexture,
                                                  int clearColor, float clearDepth, int clearStencil,
                                                  int width, int height);
-    private static native void setPipeline(long ptr, long renderPass, long pipeline);
+    public static native void setPipeline(long ptr, long renderPass, long pipeline);
 
     // Buffer operations - duplicate declarations removed, moved above
 
@@ -312,9 +312,9 @@ public class BassaltDevice implements GpuDevice {
      * Load a pre-converted WGSL shader from resources
      */
     private String loadPreconvertedWgsl(net.minecraft.resources.Identifier shaderId, String stage) {
-        // Convert shader ID to path: "minecraft:core/gui" -> "shaders/wgsl/core/gui.wgsl"
+        // Convert shader ID to path: "minecraft:core/gui" -> "shaders/wgsl/core/gui.vert.wgsl" or "shaders/wgsl/core/gui.frag.wgsl"
         String shaderPath = shaderId.getPath(); // Returns "core/gui"
-        String resourcePath = "shaders/wgsl/" + shaderPath + ".wgsl"; // Results in "shaders/wgsl/core/gui.wgsl"
+        String resourcePath = "shaders/wgsl/" + shaderPath + "." + stage + ".wgsl"; // Results in "shaders/wgsl/core/gui.vert.wgsl"
 
         try (var input = getClass().getResourceAsStream("/" + resourcePath)) {
             if (input == null) {
@@ -335,18 +335,58 @@ public class BassaltDevice implements GpuDevice {
         // 2 = POSITION_TEX (3 floats + 2 floats)
         // 3 = POSITION_TEX_COLOR (3 floats + 2 floats + 4 floats)
         // 4 = POSITION_TEX_COLOR_NORMAL (3 floats + 2 floats + 4 floats + 3 floats)
+        // 5 = POSITION_COLOR_TEX (3 floats + 4 floats + 2 floats)
+        // 6 = POSITION_COLOR_TEX_TEX_TEX_NORMAL (position, color, uv0, uv1, uv2, normal)
         String name = format.toString().toLowerCase();
-        return switch (name) {
-            case "position" -> 0;
-            case "position_color" -> 1;
-            case "position_tex" -> 2;
-            case "position_tex_color" -> 3;
-            case "position_tex_color_normal" -> 4;
-            default -> {
-                System.err.println("[Bassalt] Unknown vertex format: " + name + ", defaulting to position_tex_color");
-                yield 3;
+
+        // Parse the format string: "vertexformat[position, color, ...]"
+        if (name.startsWith("vertexformat[") && name.endsWith("]")) {
+            String elements = name.substring(13, name.length() - 1); // Extract "position, color, ..."
+            if (elements.isEmpty()) {
+                System.err.println("[Bassalt] Empty vertex format, defaulting to position");
+                return 0;
             }
-        };
+
+            String[] parts = elements.split(",\\s*");
+
+            // Count element types
+            boolean hasPosition = false;
+            boolean hasColor = false;
+            int uvCount = 0;
+            boolean hasNormal = false;
+
+            for (String part : parts) {
+                if (part.equals("position")) hasPosition = true;
+                else if (part.equals("color")) hasColor = true;
+                else if (part.startsWith("uv")) uvCount++;
+                else if (part.equals("normal")) hasNormal = true;
+            }
+
+            // Map to format index based on elements
+            if (hasPosition && !hasColor && uvCount == 0 && !hasNormal) {
+                return 0; // POSITION
+            } else if (hasPosition && hasColor && uvCount == 0 && !hasNormal) {
+                return 1; // POSITION_COLOR
+            } else if (hasPosition && !hasColor && uvCount == 1 && !hasNormal) {
+                return 2; // POSITION_TEX
+            } else if (hasPosition && hasColor && uvCount == 1 && !hasNormal) {
+                // Check element order
+                if (parts.length >= 2 && parts[1].equals("color")) {
+                    return 5; // POSITION_COLOR_TEX
+                } else {
+                    return 3; // POSITION_TEX_COLOR
+                }
+            } else if (hasPosition && hasColor && uvCount == 1 && hasNormal) {
+                return 4; // POSITION_TEX_COLOR_NORMAL (reusing for POSITION_COLOR_TEX_NORMAL)
+            } else if (hasPosition && hasColor && uvCount == 2 && hasNormal) {
+                return 7; // POSITION_COLOR_TEX_TEX_NORMAL (position, color, uv0, uv2, normal)
+            } else if (hasPosition && hasColor && uvCount == 3 && hasNormal) {
+                return 6; // POSITION_COLOR_TEX_TEX_TEX_NORMAL
+            }
+        }
+
+        System.err.println("[Bassalt] Unknown vertex format: " + name + ", defaulting to position_tex_color");
+        return 3;
     }
 
     private int getVertexFormatModeIndex(com.mojang.blaze3d.vertex.VertexFormat.Mode mode) {
@@ -489,11 +529,15 @@ public class BassaltDevice implements GpuDevice {
 
     private static int toBassaltTextureUsage(int minecraftUsage) {
         int usage = 0;
-        if ((minecraftUsage & 0x01) != 0) usage |= BassaltBackend.TEXTURE_USAGE_COPY_SRC;
-        if ((minecraftUsage & 0x02) != 0) usage |= BassaltBackend.TEXTURE_USAGE_COPY_DST;
-        if ((minecraftUsage & 0x04) != 0) usage |= BassaltBackend.TEXTURE_USAGE_TEXTURE_BINDING;
-        if ((minecraftUsage & 0x08) != 0) usage |= BassaltBackend.TEXTURE_USAGE_STORAGE_BINDING;
-        if ((minecraftUsage & 0x10) != 0) usage |= BassaltBackend.TEXTURE_USAGE_RENDER_ATTACHMENT;
+        // Map Minecraft usage flags to Bassalt usage flags
+        // NOTE: Minecraft and Bassalt use different bit positions for the same flags!
+        // Minecraft: COPY_DST=1, COPY_SRC=2, TEXTURE_BINDING=4, RENDER_ATTACHMENT=8, CUBEMAP=16
+        // Bassalt:   COPY_SRC=1, COPY_DST=2, TEXTURE_BINDING=4, STORAGE=8, RENDER_ATTACHMENT=16
+        if ((minecraftUsage & 0x01) != 0) usage |= BassaltBackend.TEXTURE_USAGE_COPY_DST;  // MC COPY_DST → Bassalt COPY_DST
+        if ((minecraftUsage & 0x02) != 0) usage |= BassaltBackend.TEXTURE_USAGE_COPY_SRC;  // MC COPY_SRC → Bassalt COPY_SRC
+        if ((minecraftUsage & 0x04) != 0) usage |= BassaltBackend.TEXTURE_USAGE_TEXTURE_BINDING;  // MC TEXTURE_BINDING → Bassalt TEXTURE_BINDING
+        if ((minecraftUsage & 0x08) != 0) usage |= BassaltBackend.TEXTURE_USAGE_RENDER_ATTACHMENT;  // MC RENDER_ATTACHMENT → Bassalt RENDER_ATTACHMENT
+        // Note: Minecraft's CUBEMAP_COMPATIBLE (0x10) doesn't have a direct Bassalt equivalent
 
         // WebGPU requires COPY_DST to upload texture data, but OpenGL doesn't distinguish.
         // Always add COPY_DST so we can write to any texture (like OpenGL).
@@ -531,5 +575,7 @@ public class BassaltDevice implements GpuDevice {
     public static native void setVertexBuffer(long ptr, long renderPass, int slot, long buffer, long offset);
     public static native void setIndexBuffer(long ptr, long renderPass, long buffer, int indexType, long offset);
     public static native void drawIndexed(long ptr, long renderPass, int indexCount, int instanceCount, int firstIndex, int baseVertex, int firstInstance);
+    public static native void draw(long ptr, long renderPass, int vertexCount, int instanceCount, int firstVertex, int firstInstance);
+    public static native void setScissorRect(long ptr, long renderPass, int x, int y, int width, int height);
     public static native void endRenderPass(long ptr, long renderPass);
 }

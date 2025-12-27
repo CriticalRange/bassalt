@@ -69,9 +69,14 @@ public class BassaltRenderPass implements RenderPass {
         checkClosed();
         this.currentPipeline = pipeline;
 
-        // Get the compiled pipeline from Minecraft's RenderPipeline
-        // This would need to call BassaltDevice.precompilePipeline
-        // For now, this is a placeholder
+        // Get the compiled pipeline from the device and call native setPipeline
+        BassaltCompiledRenderPipeline compiled = (BassaltCompiledRenderPipeline) device.precompilePipeline(pipeline, null);
+        if (compiled != null && compiled.isValid()) {
+            BassaltDevice.setPipeline(device.getNativePtr(), nativePassPtr, compiled.getNativePtr());
+        } else {
+            // Log warning if pipeline compilation failed
+            System.err.println("[Bassalt] Warning: Pipeline compilation failed for " + pipeline.getLocation());
+        }
     }
 
     @Override
@@ -114,13 +119,16 @@ public class BassaltRenderPass implements RenderPass {
     @Override
     public void enableScissor(int x, int y, int width, int height) {
         checkClosed();
-        // TODO: implement scissor support using wgpu's set_scissor_rect
+        BassaltDevice.setScissorRect(device.getNativePtr(), nativePassPtr, x, y, width, height);
     }
 
     @Override
     public void disableScissor() {
         checkClosed();
-        // TODO: implement scissor disable
+        // Disable scissor by setting it to a very large rect (effectively disabling clipping)
+        // WebGPU doesn't have a "disable scissor" command, so we set it to viewport-sized rect
+        // For now, use a large value that covers any reasonable viewport
+        BassaltDevice.setScissorRect(device.getNativePtr(), nativePassPtr, 0, 0, 16384, 16384);
     }
 
     @Override
@@ -206,7 +214,14 @@ public class BassaltRenderPass implements RenderPass {
         // Apply bindings before drawing
         applyBindings();
 
-        // TODO: implement non-indexed draw using wgpu's draw
+        BassaltDevice.draw(
+            device.getNativePtr(),
+            nativePassPtr,
+            vertexCount,
+            1,  // instanceCount
+            firstVertex,
+            0   // firstInstance
+        );
     }
 
     @Override

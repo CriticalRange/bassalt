@@ -26,7 +26,8 @@ public class BackendSwapMixin {
     @ModifyVariable(
         method = "<init>",
         at = @At("HEAD"),
-        argsOnly = true
+        argsOnly = true,
+        require = 1
     )
     private static GpuBackend[] bassalt$modifyBackendsArray(GpuBackend[] original) {
         System.out.println("[Bassalt] Modifying backends array in Window constructor");

@@ -9,10 +9,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::RwLock;
 use wgpu_core::id;
 
+/// Buffer info stored alongside ID
+#[derive(Debug, Clone, Copy)]
+pub struct BufferInfo {
+    pub id: id::BufferId,
+    pub size: u64,
+}
+
 /// Thread-safe handle store for wgpu resources
 pub struct ResourceHandleStore {
     next_handle: AtomicU64,
-    buffers: RwLock<HashMap<u64, id::BufferId>>,
+    buffers: RwLock<HashMap<u64, BufferInfo>>,
     textures: RwLock<HashMap<u64, id::TextureId>>,
     texture_views: RwLock<HashMap<u64, id::TextureViewId>>,
     samplers: RwLock<HashMap<u64, id::SamplerId>>,
@@ -42,18 +49,23 @@ impl ResourceHandleStore {
     }
 
     // Buffer operations
-    pub fn insert_buffer(&self, buffer_id: id::BufferId) -> u64 {
+    pub fn insert_buffer(&self, buffer_id: id::BufferId, size: u64) -> u64 {
         let handle = self.next();
-        self.buffers.write().insert(handle, buffer_id);
+        let info = BufferInfo { id: buffer_id, size };
+        self.buffers.write().insert(handle, info);
         handle
     }
 
     pub fn get_buffer(&self, handle: u64) -> Option<id::BufferId> {
+        self.buffers.read().get(&handle).map(|info| info.id)
+    }
+
+    pub fn get_buffer_info(&self, handle: u64) -> Option<BufferInfo> {
         self.buffers.read().get(&handle).copied()
     }
 
     pub fn remove_buffer(&self, handle: u64) -> Option<id::BufferId> {
-        self.buffers.write().remove(&handle)
+        self.buffers.write().remove(&handle).map(|info| info.id)
     }
 
     // Texture operations

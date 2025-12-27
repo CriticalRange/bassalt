@@ -155,6 +155,12 @@ jar {
 
 // Pass system properties to the runClient task
 tasks.named('runClient') {
+	// Enable mixin debugging - exports transformed classes to run/.mixin.out/
+	jvmArgs(
+		"-Dmixin.debug.export=true",
+		"-Dmixin.dumpTargetOnFailure=true"
+	)
+
 	// Pass all system properties that start with "bassalt."
 	System.getProperties().each { key, value ->
 		if (key.toString().startsWith("bassalt.")) {
