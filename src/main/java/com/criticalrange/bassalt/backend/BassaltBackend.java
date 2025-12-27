@@ -229,6 +229,10 @@ public class BassaltBackend extends GlBackend {
             long monitor,
             ShaderSource defaultShaderSource,
             GpuDebugOptions debugOptions) throws BackendCreationException {
+        System.out.println("[Bassalt] ===== createDeviceWithWindow CALLED! =====");
+        System.out.println("[Bassalt] Window size: " + width + "x" + height);
+        System.out.println("[Bassalt] Title: " + title);
+
         // Create a GLFW window without an OpenGL context
         GLFW.glfwDefaultWindowHints();
         GLFW.glfwWindowHint(GLFW.GLFW_CLIENT_API, GLFW.GLFW_NO_API);
@@ -281,13 +285,24 @@ public class BassaltBackend extends GlBackend {
         }
 
         // Create the device
+        System.out.println("[Bassalt] About to call native createDevice...");
+        System.out.println("[Bassalt]   contextPtr: " + contextPtr);
+        System.out.println("[Bassalt]   window: " + nativeWindowPtr);
+        System.out.println("[Bassalt]   display: " + displayPtr);
+        System.out.println("[Bassalt]   size: " + width + "x" + height);
+
         long devicePtr = createDevice(contextPtr, nativeWindowPtr, displayPtr, width, height);
+
+        System.out.println("[Bassalt] createDevice returned: " + devicePtr);
+
         if (devicePtr == 0) {
             GLFW.glfwDestroyWindow(window);
             throw new BackendCreationException("Failed to create Bassalt device");
         }
 
+        System.out.println("[Bassalt] Creating BassaltDevice wrapper...");
         BassaltDevice device = new BassaltDevice(devicePtr, defaultShaderSource);
+        System.out.println("[Bassalt] Device wrapper created successfully!");
         return new WindowAndDevice(window, device);
     }
 

@@ -1624,42 +1624,106 @@ pub fn create_device_from_window(
         use std::sync::Mutex as StdMutex;
         use std::sync::Arc as StdArc;
         
-        // We need to dispatch to the main thread on macOS
-        let result: StdArc<StdMutex<Option<std::result::Result<id::SurfaceId, wgpu_core::instance::CreateSurfaceError>>>> = 
-            StdArc::new(StdMutex::new(None));
+        log::info!("macOS: Starting surface creation flow");
         
-        let result_clone = StdArc::clone(&result);
-        let context_clone = context.clone();
-        // Capture only the window_ptr (which is Send), not the handles
-        let window_ptr_copy = window_ptr;
+        // Check if we're already on the main thread to avoid deadlock
+        let is_main_thread = unsafe {
+            use objc2::{msg_send, ClassType};
+            use objc2::runtime::NSObject;
+            
+            // Get NSThread class
+            let nsthread_class: *const objc2::runtime::AnyClass = objc2::runtime::AnyClass::get("NSThread").unwrap();
+            let is_main: bool = msg_send![nsthread_class, isMainThread];
+            is_main
+        };
         
-        // Dispatch synchronously to the main queue
-        dispatch::Queue::main().exec_sync(move || {
+        log::info!("macOS: Is main thread: {}", is_main_thread);
+        
+        if is_main_thread {
+            // Already on main thread, execute directly
+            log::info!("macOS: Already on main thread, executing surface creation directly");
+            
             use raw_window_handle::{AppKitWindowHandle, AppKitDisplayHandle, RawWindowHandle, RawDisplayHandle};
             use std::ptr::NonNull;
             
-            // Reconstruct handles on the main thread
-            let window_handle = AppKitWindowHandle::new(NonNull::new(window_ptr_copy as *mut _).unwrap());
+            // CRITICAL: glfwGetCocoaWindow returns NSWindow*, but wgpu needs NSView*
+            let ns_view = unsafe {
+                use objc2::runtime::AnyObject;
+                use objc2::msg_send;
+                
+                let ns_window = window_ptr as *mut AnyObject;
+                let content_view: *mut AnyObject = msg_send![ns_window, contentView];
+                content_view as *mut std::ffi::c_void
+            };
+            
+            log::info!("macOS: Got NSWindow at {:p}, contentView at {:p}", 
+                      window_ptr as *const (), ns_view);
+            
+            let window_handle = AppKitWindowHandle::new(NonNull::new(ns_view as *mut _).unwrap());
             let display_handle = AppKitDisplayHandle::new();
             let raw_window_handle = RawWindowHandle::AppKit(window_handle);
             let raw_display_handle = RawDisplayHandle::AppKit(display_handle);
             
             let surface_result = unsafe {
-                context_clone.inner().instance_create_surface(
+                context.inner().instance_create_surface(
                     raw_display_handle,
                     raw_window_handle,
                     None,
                 )
             };
             
-            *result_clone.lock().unwrap() = Some(surface_result);
-        });
-        
-        // Extract the result
-        let final_result = result.lock().unwrap();
-        match final_result.as_ref().unwrap() {
-            Ok(id) => *id,
-            Err(e) => return Err(BasaltError::Surface(format!("Failed to create surface: {:?}", e))),
+            surface_result.map_err(|e| BasaltError::Surface(format!("Failed to create surface: {:?}", e)))?
+        } else {
+            // On a background thread, dispatch to main
+            log::info!("macOS: On background thread, dispatching to main queue");
+            
+            let result: StdArc<StdMutex<Option<std::result::Result<id::SurfaceId, wgpu_core::instance::CreateSurfaceError>>>> = 
+                StdArc::new(StdMutex::new(None));
+            
+            let result_clone = StdArc::clone(&result);
+            let context_clone = context.clone();
+            let window_ptr_copy = window_ptr;
+            
+            dispatch::Queue::main().exec_sync(move || {
+                log::info!("macOS: Inside GCD main queue block");
+                
+                use raw_window_handle::{AppKitWindowHandle, AppKitDisplayHandle, RawWindowHandle, RawDisplayHandle};
+                use std::ptr::NonNull;
+                
+                let ns_view = unsafe {
+                    use objc2::runtime::AnyObject;
+                    use objc2::msg_send;
+                    
+                    let ns_window = window_ptr_copy as *mut AnyObject;
+                    let content_view: *mut AnyObject = msg_send![ns_window, contentView];
+                    content_view as *mut std::ffi::c_void
+                };
+                
+                log::info!("macOS: Got NSWindow at {:p}, contentView at {:p}", 
+                          window_ptr_copy as *const (), ns_view);
+                
+                let window_handle = AppKitWindowHandle::new(NonNull::new(ns_view as *mut _).unwrap());
+                let display_handle = AppKitDisplayHandle::new();
+                let raw_window_handle = RawWindowHandle::AppKit(window_handle);
+                let raw_display_handle = RawDisplayHandle::AppKit(display_handle);
+                
+                let surface_result = unsafe {
+                    context_clone.inner().instance_create_surface(
+                        raw_display_handle,
+                        raw_window_handle,
+                        None,
+                    )
+                };
+                
+                *result_clone.lock().unwrap() = Some(surface_result);
+            });
+            
+            let surface_id = result.lock()
+                .unwrap()
+                .take()
+                .unwrap()
+                .map_err(|e| BasaltError::Surface(format!("Failed to create surface: {:?}", e)))?;
+            surface_id
         }
     };
     
