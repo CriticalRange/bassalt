@@ -218,4 +218,126 @@ impl BindGroupBuilder {
 
         Ok(bind_group_id)
     }
+
+    /// Build the bind group using an existing layout (from a pipeline)
+    /// Uses binding_layouts to determine what type each slot expects
+    pub fn build_with_layout(
+        self, 
+        layout_id: id::BindGroupLayoutId, 
+        binding_layouts: &[crate::resource_handles::BindingLayoutEntry]
+    ) -> Result<id::BindGroupId> {
+        use crate::resource_handles::BindingLayoutType;
+        
+        let global = self.context.inner();
+
+        // Collect our available resources by type
+        let mut texture_entries: Vec<_> = self.entries.iter()
+            .filter_map(|(binding, e)| match e {
+                BindingEntry::Texture { view_id, dimension, .. } => 
+                    Some((*binding, *view_id, *dimension)),
+                _ => None,
+            })
+            .collect();
+        
+        let mut sampler_entries: Vec<_> = self.entries.iter()
+            .filter_map(|(binding, e)| match e {
+                BindingEntry::Texture { sampler_id: Some(s), .. } => Some((*binding, *s)),
+                _ => None,
+            })
+            .collect();
+        
+        let uniform_entries: Vec<_> = self.entries.iter()
+            .filter_map(|(_, e)| match e {
+                BindingEntry::UniformBuffer { buffer_id, offset, .. } => 
+                    Some((*buffer_id, *offset)),
+                _ => None,
+            })
+            .collect();
+
+        // Build bind entries by matching layout expectations to our resources
+        let mut bind_entries = Vec::new();
+        let mut texture_idx = 0;
+        let mut sampler_idx = 0;
+        let mut uniform_idx = 0;
+
+        for layout_entry in binding_layouts {
+            match layout_entry.ty {
+                BindingLayoutType::Texture => {
+                    if texture_idx < texture_entries.len() {
+                        let (_, view_id, _) = texture_entries[texture_idx];
+                        bind_entries.push(binding_model::BindGroupEntry {
+                            binding: layout_entry.binding,
+                            resource: binding_model::BindingResource::TextureView(view_id),
+                        });
+                        texture_idx += 1;
+                        log::debug!("Bound texture to slot {}", layout_entry.binding);
+                    } else {
+                        log::warn!("No texture available for binding {}", layout_entry.binding);
+                    }
+                }
+                BindingLayoutType::Sampler => {
+                    if sampler_idx < sampler_entries.len() {
+                        let (_, sampler_id) = sampler_entries[sampler_idx];
+                        bind_entries.push(binding_model::BindGroupEntry {
+                            binding: layout_entry.binding,
+                            resource: binding_model::BindingResource::Sampler(sampler_id),
+                        });
+                        sampler_idx += 1;
+                        log::debug!("Bound sampler to slot {}", layout_entry.binding);
+                    } else {
+                        log::warn!("No sampler available for binding {}", layout_entry.binding);
+                    }
+                }
+                BindingLayoutType::UniformBuffer => {
+                    if uniform_idx < uniform_entries.len() {
+                        let (buffer_id, offset) = uniform_entries[uniform_idx];
+                        bind_entries.push(binding_model::BindGroupEntry {
+                            binding: layout_entry.binding,
+                            resource: binding_model::BindingResource::Buffer(
+                                binding_model::BufferBinding {
+                                    buffer: buffer_id,
+                                    offset,
+                                    // Use None to bind entire buffer - allows smaller buffers than shader declares
+                                    size: None,
+                                },
+                            ),
+                        });
+                        uniform_idx += 1;
+                        log::debug!("Bound uniform buffer to slot {}", layout_entry.binding);
+                    } else {
+                        log::warn!("No uniform buffer available for binding {}", layout_entry.binding);
+                    }
+                }
+                BindingLayoutType::StorageBuffer => {
+                    log::warn!("Storage buffers not yet implemented for binding {}", layout_entry.binding);
+                }
+            }
+        }
+        
+        log::debug!("Building bind group with {} entries (layout expects {})", 
+                   bind_entries.len(), binding_layouts.len());
+
+        // Create bind group using the provided layout
+        let bind_group_desc = binding_model::BindGroupDescriptor {
+            label: Some(Cow::Borrowed("Bassalt Pipeline Bind Group")),
+            layout: layout_id,
+            entries: Cow::Owned(bind_entries),
+        };
+
+        let (bind_group_id, bind_group_error) =
+            global.device_create_bind_group(self.device_id, &bind_group_desc, None);
+
+        if let Some(e) = bind_group_error {
+            return Err(BasaltError::Device(format!(
+                "Failed to create bind group with pipeline layout: {:?}",
+                e
+            )));
+        }
+
+        log::debug!(
+            "Created bind group using pipeline layout"
+        );
+
+        Ok(bind_group_id)
+    }
 }

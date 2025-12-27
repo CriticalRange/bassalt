@@ -1,5 +1,22 @@
 # CLAUDE.md
 
+Summary
+We've made major progress implementing the stub features:
+
+✅ Successfully Fixed:
+Pipeline-BindGroup Layout Matching - Bind groups now use the pipeline's expected layout
+Binding Type Matching - Textures, samplers, and uniforms are now bound to correct slots based on shader reflection
+macOS Threading - Surface creation works properly on main thread
+⚠️ Remaining Issues (Non-Fatal):
+Buffer Size Mismatches - Some Minecraft uniform buffers don't match shader expectations
+Depth Stencil Attachment Mismatches - Some pipelines expect different depth formats
+Buffer Too Large - Some buffers exceed uniform binding limits
+These issues cause some draw calls to fail, but the game continues running. They're deeper architectural issues that require:
+
+Proper buffer memory management
+Dynamic uniform buffers with slicing
+Per-pipeline depth stencil configuration
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
@@ -187,14 +204,87 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
 
 ### Shader Translation Pipeline
 
-Minecraft GLSL shaders are translated to WGSL via naga:
+Minecraft uses pre-converted WGSL shaders stored in resource packs:
 
-1. **Preprocess**: Remove `#version`, `#moj_import`, precision qualifiers
-2. **Translate**: naga converts GLSL to WGSL
-3. **Builtin Conversion**: Map GLSL builtins to WGSL equivalents
-   - `gl_Position` -> `builtin(position)`
-   - `gl_VertexID` -> `builtin(vertex_index)`
-   - `gl_FragColor` -> return value
+**Shader Location**: `src/main/resources/assets/bassaltrenderer/shaders/wgsl/`
+
+**Shader Naming**: `<shader_name>_<type>.wgsl` (e.g., `position_tex_color_vs.wgsl`, `position_tex_color_fs.wgsl`)
+
+**Shader Converter**: `bassalt-native/src/bin/shader_converter.rs` converts GLSL to WGSL:
+```bash
+cargo run --bin shader_converter -- <input_glsl> <output_wgsl> --type vertex|fragment
+```
+
+**Shader Reflection**: When creating render pipelines, naga parses the WGSL to extract:
+- Binding layout (which slot expects texture/sampler/uniform)
+- Binding types for type-safe bind group creation
+- Uniform buffer struct sizes
+
+### Bind Group Layout System
+
+The bind group system uses shader reflection to ensure correct resource binding:
+
+```rust
+// resource_handles.rs
+pub enum BindingLayoutType {
+    Texture,
+    Sampler,
+    UniformBuffer,
+    StorageBuffer,
+}
+
+pub struct BindingLayoutEntry {
+    pub binding: u32,       // Slot number
+    pub ty: BindingLayoutType, // Expected resource type
+}
+
+pub struct RenderPipelineInfo {
+    pub id: id::RenderPipelineId,
+    pub bind_group_layout_id: id::BindGroupLayoutId,
+    pub binding_layouts: Vec<BindingLayoutEntry>, // What each slot expects
+}
+```
+
+**Workflow**:
+1. Pipeline creation extracts binding info from shader via naga reflection
+2. `RenderPipelineInfo` stores the expected binding types
+3. When creating bind groups, resources are matched to slots by type
+4. Textures → Texture slots, Samplers → Sampler slots, Uniforms → Uniform slots
+
+### macOS-Specific Implementation
+
+**Surface Creation**: macOS requires special handling for Metal:
+
+```rust
+// device.rs - macOS surface creation
+#[cfg(target_os = "macos")]
+{
+    // GLFW returns NSWindow*, but wgpu/Metal needs NSView*
+    // Must get contentView from NSWindow using Objective-C interop
+    let ns_view = unsafe {
+        use objc2::{msg_send, runtime::AnyObject};
+        let ns_window = window_ptr as *mut AnyObject;
+        let content_view: *mut AnyObject = msg_send![ns_window, contentView];
+        content_view as *mut std::ffi::c_void
+    };
+    
+    // Check if already on main thread to avoid deadlock
+    let is_main: bool = unsafe { msg_send![class!(NSThread), isMainThread] };
+    if is_main {
+        // Create surface directly
+    } else {
+        // Dispatch to main queue synchronously
+        dispatch::Queue::main().exec_sync(|| { ... });
+    }
+}
+```
+
+**Dependencies for macOS** (in Cargo.toml):
+```toml
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+dispatch = "0.2"
+```
 
 ### Type Mapping: Minecraft → WebGPU
 
@@ -300,13 +390,56 @@ Rust dependencies are in `bassalt-native/Cargo.toml`:
 - `wgpu-hal = "27.0"` - Hardware abstraction layer
 - `naga = "27.0"` - Shader translation
 - `jni = "0.21"` - JNI bindings (note: 0.21, not 0.22)
+- `objc2 = "0.5"` - macOS Objective-C interop
+
+## Current Implementation Status
+
+### ✅ Working Features
+- **Device Creation**: Works on macOS (Metal), Linux (Vulkan), Windows (DX12)
+- **Surface Creation**: Proper window handle extraction (NSView on macOS)
+- **Buffer Creation**: Vertex, index, and uniform buffers
+- **Texture/Sampler Creation**: 2D textures with samplers
+- **Render Pipeline Creation**: From pre-converted WGSL shaders
+- **Shader Reflection**: Extracts binding layout from naga modules
+- **Bind Group System**: Type-aware binding matches shader expectations
+- **Render Pass Recording**: Commands recorded and submitted
+- **Frame Presentation**: Swapchain acquire/present cycle
+
+### ⚠️ Known Issues (Non-Fatal)
+1. **Buffer Size Mismatch**: Some shaders expect larger uniform buffers than Minecraft provides
+   - Error: `BindingSizeTooSmall(shader_size: 160, bound_size: 56)`
+   - Cause: WGSL uniform struct is larger than Minecraft's actual data
+   - Workaround: Non-fatal, draw call skipped
+   
+2. **Buffer Range Too Large**: Some vertex/instance buffers exceed uniform limits
+   - Error: `BufferRangeTooLarge { given: 147712, limit: 65536 }`
+   - Cause: Large buffers bound to uniform slots
+   - Fix needed: Dynamic uniform buffer management
+   
+3. **Depth Stencil Mismatch**: Some pipelines expect different depth formats
+   - Error: `IncompatibleDepthStencilAttachment { expected: None, actual: Some(Depth32Float) }`
+   - Cause: Pipeline created without depth state, but render pass has depth attachment
+   - Fix needed: Per-pipeline depth stencil configuration
+   
+4. **No Main Framebuffer Detection**: Present() sometimes has nothing to show
+   - Warning: `No main framebuffer detected - nothing to present`
+   - Cause: Render pass targeting non-swapchain texture
+   - Fix needed: Better main render target tracking
+
+### 🔲 Not Yet Implemented
+- Compute shaders
+- Multisampling (MSAA)
+- Dynamic uniform buffer slicing
+- Pipeline caching
+- Ray tracing
 
 ## Known Limitations
 
-1. **Shader Coverage**: Not all Minecraft GLSL features are translated yet
+1. **Shader Coverage**: Pre-converted WGSL shaders must be provided for each Minecraft shader
 2. **Compute Shaders**: Not yet implemented in native layer
 3. **Multisampling**: Basic MSAA support only
 4. **Bindless Resources**: Uses bind groups (not bindless textures)
+5. **Uniform Buffer Size**: Minecraft uniform buffers may not match shader expectations
 
 ## Important Notes
 
@@ -314,6 +447,7 @@ Rust dependencies are in `bassalt-native/Cargo.toml`:
 - **Resource ID pattern**: wgpu-core uses resource IDs (like `BufferId`, `TextureId`) which are converted to/from `jlong` handles
 - **Arc usage**: The global context uses `Arc` for reference counting; when extracting from raw pointers, remember to re-clone or forget as appropriate
 - **GLSL preprocessing**: Minecraft's shader format requires preprocessing (removing `#version`, `#moj_import`, precision qualifiers) before naga translation
+- **Binding slots**: Always check shader reflection to determine correct binding slot types - don't assume order
 
 ## Future Enhancements
 
@@ -321,3 +455,5 @@ Rust dependencies are in `bassalt-native/Cargo.toml`:
 - Ray tracing support (WebGPU extension)
 - Async compute pipelines
 - Pipeline caching for faster startup
+- Dynamic uniform buffer management for proper sizing
+- Per-pipeline depth stencil configuration

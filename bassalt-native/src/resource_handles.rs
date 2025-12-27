@@ -32,6 +32,31 @@ pub struct TextureInfo {
     pub dimension: wgpu_types::TextureDimension,
 }
 
+/// Type of binding expected at a slot
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindingLayoutType {
+    Texture,
+    Sampler,
+    UniformBuffer,
+    StorageBuffer,
+}
+
+/// Binding layout entry for a specific slot
+#[derive(Debug, Clone, Copy)]
+pub struct BindingLayoutEntry {
+    pub binding: u32,
+    pub ty: BindingLayoutType,
+}
+
+/// Render pipeline info stored alongside ID
+#[derive(Debug, Clone)]
+pub struct RenderPipelineInfo {
+    pub id: id::RenderPipelineId,
+    pub bind_group_layout_id: id::BindGroupLayoutId,
+    pub binding_layouts: Vec<BindingLayoutEntry>, // What type each binding expects
+}
+
+
 /// Thread-safe handle store for wgpu resources
 pub struct ResourceHandleStore {
     next_handle: AtomicU64,
@@ -41,7 +66,7 @@ pub struct ResourceHandleStore {
     samplers: RwLock<HashMap<u64, id::SamplerId>>,
     bind_groups: RwLock<HashMap<u64, id::BindGroupId>>,
     bind_group_layouts: RwLock<HashMap<u64, id::BindGroupLayoutId>>,
-    render_pipelines: RwLock<HashMap<u64, id::RenderPipelineId>>,
+    render_pipelines: RwLock<HashMap<u64, RenderPipelineInfo>>,
     command_encoders: RwLock<HashMap<u64, id::CommandEncoderId>>,
 }
 
@@ -179,18 +204,32 @@ impl ResourceHandleStore {
     }
 
     // Render pipeline operations
-    pub fn insert_render_pipeline(&self, pipeline_id: id::RenderPipelineId) -> u64 {
+    pub fn insert_render_pipeline(
+        &self,
+        pipeline_id: id::RenderPipelineId,
+        bind_group_layout_id: id::BindGroupLayoutId,
+        binding_layouts: Vec<BindingLayoutEntry>,
+    ) -> u64 {
         let handle = self.next();
-        self.render_pipelines.write().insert(handle, pipeline_id);
+        let info = RenderPipelineInfo {
+            id: pipeline_id,
+            bind_group_layout_id,
+            binding_layouts,
+        };
+        self.render_pipelines.write().insert(handle, info);
         handle
     }
 
     pub fn get_render_pipeline(&self, handle: u64) -> Option<id::RenderPipelineId> {
-        self.render_pipelines.read().get(&handle).copied()
+        self.render_pipelines.read().get(&handle).map(|info| info.id)
+    }
+
+    pub fn get_render_pipeline_info(&self, handle: u64) -> Option<RenderPipelineInfo> {
+        self.render_pipelines.read().get(&handle).cloned()
     }
 
     pub fn remove_render_pipeline(&self, handle: u64) -> Option<id::RenderPipelineId> {
-        self.render_pipelines.write().remove(&handle)
+        self.render_pipelines.write().remove(&handle).map(|info| info.id)
     }
 
     // Command encoder operations

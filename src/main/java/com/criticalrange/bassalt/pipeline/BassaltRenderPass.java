@@ -41,13 +41,16 @@ public class BassaltRenderPass implements RenderPass {
     private final Map<String, TextureBinding> textureBindings = new HashMap<>();
     private final Map<String, UniformBinding> uniformBindings = new HashMap<>();
     private RenderPipeline currentPipeline;
+    private long currentPipelineHandle = 0; // Native handle for current pipeline
 
     // Native methods for bind group management
-    private static native long createBindGroup0(long devicePtr, long renderPassPtr,
-                                                 String[] textureNames, long[] textures, long[] samplers,
-                                                 String[] uniformNames, long[] uniforms);
+    // pipeline_handle is required to use the correct bind group layout
+    private static native long createBindGroup0(long devicePtr, long renderPassPtr, long pipelineHandle,
+            String[] textureNames, long[] textures, long[] samplers,
+            String[] uniformNames, long[] uniforms);
+
     private static native void setBindGroup0(long devicePtr, long renderPassPtr,
-                                              int index, long bindGroupPtr);
+            int index, long bindGroupPtr);
 
     BassaltRenderPass(BassaltDevice device, long nativePassPtr) {
         this.device = device;
@@ -70,10 +73,13 @@ public class BassaltRenderPass implements RenderPass {
         this.currentPipeline = pipeline;
 
         // Get the compiled pipeline from the device and call native setPipeline
-        BassaltCompiledRenderPipeline compiled = (BassaltCompiledRenderPipeline) device.precompilePipeline(pipeline, null);
+        BassaltCompiledRenderPipeline compiled = (BassaltCompiledRenderPipeline) device.precompilePipeline(pipeline,
+                null);
         if (compiled != null && compiled.isValid()) {
+            this.currentPipelineHandle = compiled.getNativePtr();
             BassaltDevice.setPipeline(device.getNativePtr(), nativePassPtr, compiled.getNativePtr());
         } else {
+            this.currentPipelineHandle = 0;
             // Log warning if pipeline compilation failed
             System.err.println("[Bassalt] Warning: Pipeline compilation failed for " + pipeline.getLocation());
         }
@@ -82,14 +88,16 @@ public class BassaltRenderPass implements RenderPass {
     @Override
     public void bindTexture(@Nullable String name, @Nullable GpuTextureView textureView, @Nullable GpuSampler sampler) {
         checkClosed();
-        if (name == null) return;
+        if (name == null)
+            return;
 
         if (textureView == null) {
             textureBindings.remove(name);
         } else if (textureView instanceof BassaltTextureView) {
             long texturePtr = ((BassaltTextureView) textureView).getNativePtr();
             long samplerPtr = sampler != null && sampler instanceof BassaltSampler
-                ? ((BassaltSampler) sampler).getNativePtr() : 0;
+                    ? ((BassaltSampler) sampler).getNativePtr()
+                    : 0;
             textureBindings.put(name, new TextureBinding(texturePtr, samplerPtr));
         }
     }
@@ -97,7 +105,8 @@ public class BassaltRenderPass implements RenderPass {
     @Override
     public void setUniform(@Nullable String name, GpuBuffer value) {
         checkClosed();
-        if (name == null || value == null) return;
+        if (name == null || value == null)
+            return;
 
         if (value instanceof BassaltBuffer) {
             long bufferPtr = ((BassaltBuffer) value).getNativePtr();
@@ -108,7 +117,8 @@ public class BassaltRenderPass implements RenderPass {
     @Override
     public void setUniform(@Nullable String name, GpuBufferSlice value) {
         checkClosed();
-        if (name == null || value == null) return;
+        if (name == null || value == null)
+            return;
 
         if (value.buffer() instanceof BassaltBuffer) {
             long bufferPtr = ((BassaltBuffer) value.buffer()).getNativePtr();
@@ -125,8 +135,10 @@ public class BassaltRenderPass implements RenderPass {
     @Override
     public void disableScissor() {
         checkClosed();
-        // Disable scissor by setting it to a very large rect (effectively disabling clipping)
-        // WebGPU doesn't have a "disable scissor" command, so we set it to viewport-sized rect
+        // Disable scissor by setting it to a very large rect (effectively disabling
+        // clipping)
+        // WebGPU doesn't have a "disable scissor" command, so we set it to
+        // viewport-sized rect
         // For now, use a large value that covers any reasonable viewport
         BassaltDevice.setScissorRect(device.getNativePtr(), nativePassPtr, 0, 0, 16384, 16384);
     }
@@ -134,33 +146,33 @@ public class BassaltRenderPass implements RenderPass {
     @Override
     public void setVertexBuffer(int slot, @Nullable GpuBuffer vertexBuffer) {
         checkClosed();
-        if (vertexBuffer == null || !(vertexBuffer instanceof BassaltBuffer)) return;
+        if (vertexBuffer == null || !(vertexBuffer instanceof BassaltBuffer))
+            return;
 
         long bufferPtr = ((BassaltBuffer) vertexBuffer).getNativePtr();
         device.setVertexBuffer(
-            device.getNativePtr(),
-            nativePassPtr,
-            slot,
-            bufferPtr,
-            0
-        );
+                device.getNativePtr(),
+                nativePassPtr,
+                slot,
+                bufferPtr,
+                0);
     }
 
     @Override
     public void setIndexBuffer(@Nullable GpuBuffer indexBuffer, VertexFormat.@Nullable IndexType indexType) {
         checkClosed();
-        if (indexBuffer == null || !(indexBuffer instanceof BassaltBuffer)) return;
+        if (indexBuffer == null || !(indexBuffer instanceof BassaltBuffer))
+            return;
 
         long bufferPtr = ((BassaltBuffer) indexBuffer).getNativePtr();
         int type = indexType == VertexFormat.IndexType.INT ? 1 : 0;
 
         device.setIndexBuffer(
-            device.getNativePtr(),
-            nativePassPtr,
-            bufferPtr,
-            type,
-            0
-        );
+                device.getNativePtr(),
+                nativePassPtr,
+                bufferPtr,
+                type,
+                0);
     }
 
     @Override
@@ -170,27 +182,27 @@ public class BassaltRenderPass implements RenderPass {
         applyBindings();
 
         device.drawIndexed(
-            device.getNativePtr(),
-            nativePassPtr,
-            indexCount,
-            instanceCount,
-            firstIndex,
-            baseVertex,
-            0
-        );
+                device.getNativePtr(),
+                nativePassPtr,
+                indexCount,
+                instanceCount,
+                firstIndex,
+                baseVertex,
+                0);
     }
 
     @Override
     public <T> void drawMultipleIndexed(
-        Collection<Draw<T>> draws,
-        @Nullable GpuBuffer defaultIndexBuffer,
-        VertexFormat.@Nullable IndexType defaultIndexType,
-        @Nullable Collection<String> dynamicUniforms,
-        T uniformArgument
-    ) {
+            Collection<Draw<T>> draws,
+            @Nullable GpuBuffer defaultIndexBuffer,
+            VertexFormat.@Nullable IndexType defaultIndexType,
+            @Nullable Collection<String> dynamicUniforms,
+            T uniformArgument) {
         for (Draw<T> draw : draws) {
-            // Draw record has: slot, vertexBuffer, indexBuffer, indexType, firstIndex, indexCount, uniformUploaderConsumer
-            // Pipeline should be set separately with setPipeline() before calling this method
+            // Draw record has: slot, vertexBuffer, indexBuffer, indexType, firstIndex,
+            // indexCount, uniformUploaderConsumer
+            // Pipeline should be set separately with setPipeline() before calling this
+            // method
             setVertexBuffer(draw.slot(), draw.vertexBuffer());
 
             GpuBuffer indexBuf = draw.indexBuffer() != null ? draw.indexBuffer() : defaultIndexBuffer;
@@ -215,12 +227,12 @@ public class BassaltRenderPass implements RenderPass {
         applyBindings();
 
         BassaltDevice.draw(
-            device.getNativePtr(),
-            nativePassPtr,
-            vertexCount,
-            1,  // instanceCount
-            firstVertex,
-            0   // firstInstance
+                device.getNativePtr(),
+                nativePassPtr,
+                vertexCount,
+                1, // instanceCount
+                firstVertex,
+                0 // firstInstance
         );
     }
 
@@ -262,16 +274,16 @@ public class BassaltRenderPass implements RenderPass {
             i++;
         }
 
-        // Create and apply bind group
+        // Create and apply bind group using current pipeline's layout
         long bindGroupPtr = createBindGroup0(
-            device.getNativePtr(),
-            nativePassPtr,  // Using renderPass as pipeline proxy for now
-            textureNames,
-            textures,
-            samplers,
-            uniformNames,
-            uniforms
-        );
+                device.getNativePtr(),
+                nativePassPtr,
+                currentPipelineHandle, // Pass pipeline handle for correct bind group layout
+                textureNames,
+                textures,
+                samplers,
+                uniformNames,
+                uniforms);
 
         if (bindGroupPtr != 0) {
             setBindGroup0(device.getNativePtr(), nativePassPtr, 0, bindGroupPtr);

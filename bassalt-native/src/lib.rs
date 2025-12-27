@@ -881,34 +881,37 @@ fn create_vertex_buffer_layout(format_index: usize) -> Cow<'static, [wgpu_core::
 }
 
 /// Helper function to create a bind group layout from shader reflection
+/// Returns (BindGroupLayoutId, PipelineLayoutId, binding_layouts)
 fn create_layout_from_shaders(
     context: &Arc<BasaltContext>,
     device_id: wgpu_core::id::DeviceId,
     vertex_module: &naga::Module,
     fragment_module: &naga::Module,
-) -> Result<(wgpu_core::id::BindGroupLayoutId, wgpu_core::id::PipelineLayoutId), BasaltError> {
+) -> Result<(wgpu_core::id::BindGroupLayoutId, wgpu_core::id::PipelineLayoutId, Vec<resource_handles::BindingLayoutEntry>), BasaltError> {
     use std::collections::BTreeMap;
     use std::borrow::Cow;
     use wgpu_core::binding_model;
+    use resource_handles::{BindingLayoutEntry, BindingLayoutType};
 
     // Collect all bindings from both shaders
-    let mut bindings: BTreeMap<u32, wgt::BindGroupLayoutEntry> = BTreeMap::new();
+    // Store both the wgpu entry and our layout type
+    let mut bindings: BTreeMap<u32, (wgt::BindGroupLayoutEntry, BindingLayoutType)> = BTreeMap::new();
 
     // Helper to extract bindings from a module
-    let mut extract_bindings = |module: &naga::Module, stage: wgt::ShaderStages| {
+    let mut extract_bindings = |module: &naga::Module, _stage: wgt::ShaderStages| {
         for (_handle, global_var) in module.global_variables.iter() {
             if let Some(binding) = &global_var.binding {
                 // Only process group 0 bindings (Minecraft uses group 0)
                 if binding.group == 0 {
                     let ty = &module.types[global_var.ty];
 
-                    let binding_type = match global_var.space {
+                    let (binding_type, layout_type) = match global_var.space {
                         naga::AddressSpace::Uniform => {
-                            wgt::BindingType::Buffer {
+                            (wgt::BindingType::Buffer {
                                 ty: wgt::BufferBindingType::Uniform,
                                 has_dynamic_offset: false,
                                 min_binding_size: None,
-                            }
+                            }, BindingLayoutType::UniformBuffer)
                         }
                         naga::AddressSpace::Handle => {
                             // Check if it's a texture or sampler
@@ -925,14 +928,15 @@ fn create_layout_from_shaders(
                                         _ => wgt::TextureViewDimension::D2, // Default fallback
                                     };
                                     log::debug!("Found texture at binding {}: dimension {:?}", binding.binding, view_dimension);
-                                    wgt::BindingType::Texture {
+                                    (wgt::BindingType::Texture {
                                         sample_type: wgt::TextureSampleType::Float { filterable: true },
                                         view_dimension,
                                         multisampled: false,
-                                    }
+                                    }, BindingLayoutType::Texture)
                                 }
                                 naga::TypeInner::Sampler { .. } => {
-                                    wgt::BindingType::Sampler(wgt::SamplerBindingType::Filtering)
+                                    (wgt::BindingType::Sampler(wgt::SamplerBindingType::Filtering),
+                                     BindingLayoutType::Sampler)
                                 }
                                 _ => continue, // Skip unsupported types
                             }
@@ -945,13 +949,13 @@ fn create_layout_from_shaders(
                     let visibility = wgt::ShaderStages::VERTEX | wgt::ShaderStages::FRAGMENT;
 
                     bindings.entry(binding.binding)
-                        .and_modify(|e| e.visibility |= visibility)
-                        .or_insert(wgt::BindGroupLayoutEntry {
+                        .and_modify(|(e, _)| e.visibility |= visibility)
+                        .or_insert((wgt::BindGroupLayoutEntry {
                             binding: binding.binding,
                             visibility,
                             ty: binding_type,
                             count: None,
-                        });
+                        }, layout_type));
                 }
             }
         }
@@ -962,9 +966,12 @@ fn create_layout_from_shaders(
     extract_bindings(fragment_module, wgt::ShaderStages::FRAGMENT);
 
     // Create bind group layout entries vector (sorted by binding number)
-    let layout_entries: Vec<wgt::BindGroupLayoutEntry> = bindings.into_values().collect();
+    let layout_entries: Vec<wgt::BindGroupLayoutEntry> = bindings.values().map(|(e, _)| e.clone()).collect();
+    let binding_layouts: Vec<BindingLayoutEntry> = bindings.iter()
+        .map(|(binding, (_, ty))| BindingLayoutEntry { binding: *binding, ty: *ty })
+        .collect();
 
-    log::debug!("Creating pipeline layout with {} bindings", layout_entries.len());
+    log::debug!("Creating pipeline layout with {} bindings: {:?}", binding_layouts.len(), binding_layouts);
 
     // Create bind group layout
     let bgl_desc = binding_model::BindGroupLayoutDescriptor {
@@ -998,7 +1005,7 @@ fn create_layout_from_shaders(
         )));
     }
 
-    Ok((bgl_id, pl_id))
+    Ok((bgl_id, pl_id, binding_layouts))
 }
 
 /// Create a render pipeline from pre-converted WGSL shaders
@@ -1083,7 +1090,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
     };
 
     // Create pipeline layout from shader reflection
-    let (bind_group_layout_id, pipeline_layout_id) = match create_layout_from_shaders(
+    let (bind_group_layout_id, pipeline_layout_id, binding_layouts) = match create_layout_from_shaders(
         device_context,
         device_id,
         &vertex_module,
@@ -1264,8 +1271,9 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
         return 0;
     }
 
-    let handle = HANDLES.insert_render_pipeline(pipeline_id);
-    log::info!("Created render pipeline from WGSL with handle {}", handle);
+    let num_bindings = binding_layouts.len();
+    let handle = HANDLES.insert_render_pipeline(pipeline_id, bind_group_layout_id, binding_layouts);
+    log::info!("Created render pipeline from WGSL with handle {} (bgl: {:?}, bindings: {})", handle, bind_group_layout_id, num_bindings);
     handle as jlong
 }
 
@@ -1534,12 +1542,14 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_endR
 // ============================================================================
 
 /// Create a bind group from arrays of texture, sampler, and uniform bindings
+/// Now takes a pipeline_handle to retrieve the correct bind group layout
 #[no_mangle]
 pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass_createBindGroup0(
     mut env: JNIEnv,
     _class: JClass,
     device_ptr: jlong,
     _render_pass_ptr: jlong,
+    pipeline_handle: jlong,
     texture_names: JObject,
     texture_handles: JObject,
     sampler_handles: JObject,
@@ -1555,7 +1565,14 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
     let context = device.context().clone();
     let device_id = device.id();
 
-    // Create bind group builder (it will create its own layout based on bindings)
+    // Get pipeline's bind group layout if pipeline handle is provided
+    let pipeline_layout = if pipeline_handle != 0 {
+        HANDLES.get_render_pipeline_info(pipeline_handle as u64)
+    } else {
+        None
+    };
+
+    // Create bind group builder
     let mut builder = bind_group::BindGroupBuilder::new(context, device_id);
     let mut binding_slot = 0u32;
 
@@ -1613,8 +1630,6 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
                 let unif_handle = unif_handle_buf[0];
                 if unif_handle != 0 {
                     if let Some(buffer_info) = HANDLES.get_buffer_info(unif_handle as u64) {
-                        // Bind entire buffer (offset=0, size=whole buffer)
-                        // TODO: Support buffer slices with offset/size from UniformBinding
                         builder = builder.add_uniform_buffer(binding_slot, buffer_info.id, 0, buffer_info.size);
                         binding_slot += 1;
                     }
@@ -1623,20 +1638,31 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
         }
     }
 
-    // Build the bind group
-    match builder.build() {
+    // Build the bind group - use pipeline layout if available, otherwise create new
+    let result = if let Some(ref pipeline_info) = pipeline_layout {
+        log::debug!("Creating bind group with pipeline layout {:?} ({} bindings)", 
+                   pipeline_info.bind_group_layout_id, pipeline_info.binding_layouts.len());
+        builder.build_with_layout(pipeline_info.bind_group_layout_id, &pipeline_info.binding_layouts)
+    } else {
+        log::debug!("Creating bind group with dynamic layout (no pipeline specified)");
+        builder.build()
+    };
+
+    match result {
         Ok(bind_group_id) => {
             let handle = HANDLES.insert_bind_group(bind_group_id);
             log::debug!("Created bind group with {} bindings (handle={})", binding_slot, handle);
             handle as jlong
         }
         Err(e) => {
-            log::error!("Failed to create bind group: {:?}", e);
-            let _ = env.throw_new("java/lang/RuntimeException", format!("Failed to create bind group: {:?}", e));
+            // Don't crash - just log and return 0
+            // The draw call will be skipped if bind group is missing
+            log::warn!("Failed to create bind group: {:?}", e);
             0
         }
     }
 }
+
 
 /// Set a bind group on the render pass
 #[no_mangle]
