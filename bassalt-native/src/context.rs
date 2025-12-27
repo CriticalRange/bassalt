@@ -35,8 +35,6 @@ impl BasaltContext {
 
     /// Get adapter information as a string
     pub fn get_adapter_info(&self) -> String {
-        // This would be populated when an adapter is selected
-        // For now, return basic info
         format!(
             "Basalt Renderer (WebGPU)\nAvailable backends: Vulkan, Metal, DX12, OpenGL"
         )
@@ -44,13 +42,10 @@ impl BasaltContext {
 
     /// Get supported backends
     pub fn supported_backends(&self) -> wgt::Backends {
-        wgt::Backends::from_bits(
-            wgt::Backends::Vulkan.bits()
-                | wgt::Backends::METAL.bits()
-                | wgt::Backends::DX12.bits()
-                | wgt::Backends::GL.bits(),
-        )
-        .unwrap_or_else(|| wgt::Backends::all())
+        wgt::Backends::VULKAN
+            | wgt::Backends::METAL
+            | wgt::Backends::DX12
+            | wgt::Backends::GL
     }
 }
 

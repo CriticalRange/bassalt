@@ -1,9 +1,9 @@
 package com.criticalrange.bassalt.backend;
 
+import com.mojang.blaze3d.opengl.GlBackend;
 import com.mojang.blaze3d.shaders.GpuDebugOptions;
 import com.mojang.blaze3d.shaders.ShaderSource;
 import com.mojang.blaze3d.systems.BackendCreationException;
-import com.mojang.blaze3d.systems.GpuBackend;
 import com.mojang.blaze3d.systems.WindowAndDevice;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
@@ -17,28 +17,88 @@ import java.io.InputStream;
  *
  * This backend uses a native Rust library (wgpu-core) to provide hardware-accelerated
  * rendering through WebGPU APIs (Vulkan, DX12, Metal).
+ *
+ * Note: Extends GlBackend to satisfy Mixin @Redirect type requirements, but completely
+ * overrides all behavior with wgpu-based implementation.
  */
 @Environment(EnvType.CLIENT)
-public class BassaltBackend implements GpuBackend {
+public class BassaltBackend extends GlBackend {
 
     static {
+        boolean loaded = false;
+        UnsatisfiedLinkError firstError = null;
+
         try {
             // Try loading from library path first (development)
             System.loadLibrary("bassalt-native");
+            loaded = true;
+            System.out.println("[Bassalt] Native library loaded from library path");
         } catch (UnsatisfiedLinkError e1) {
+            firstError = e1;
+            System.out.println("[Bassalt] Library path load failed: " + e1.getMessage());
+        }
+
+        if (!loaded) {
             try {
-                // Try loading from native resources (packaged JAR)
+                // Try loading from META-INF/native/resources (packaged JAR)
                 String libName = System.mapLibraryName("bassalt-native");
-                try (InputStream in = BassaltBackend.class.getResourceAsStream("/native/" + libName)) {
-                    if (in != null) {
-                        // Extract and load from temp file
-                        File temp = File.createTempFile(libName, ".tmp");
-                        temp.deleteOnExit();
-                        java.nio.file.Files.copy(in, temp.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-                        System.load(temp.getAbsolutePath());
-                    } else {
-                        throw new RuntimeException("Bassalt native library not found", e1);
+                System.out.println("[Bassalt] Looking for library: " + libName);
+
+                // Try multiple possible locations
+                String[] resourcePaths = {
+                    "/META-INF/native/" + libName,
+                    "/native/" + libName
+                };
+
+                for (String resourcePath : resourcePaths) {
+                    try (InputStream in = BassaltBackend.class.getResourceAsStream(resourcePath)) {
+                        if (in != null) {
+                            System.out.println("[Bassalt] Found library at: " + resourcePath);
+                            // Extract and load from temp file
+                            File temp = File.createTempFile(libName, ".tmp");
+                            temp.deleteOnExit();
+                            java.nio.file.Files.copy(in, temp.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                            System.load(temp.getAbsolutePath());
+                            loaded = true;
+                            System.out.println("[Bassalt] Native library loaded from: " + resourcePath);
+                            break;
+                        }
                     }
+                }
+
+                // Development fallback: try loading from build output directory
+                if (!loaded) {
+                    String cwd = System.getProperty("user.dir");
+                    System.out.println("[Bassalt] Current working directory: " + cwd);
+
+                    // Rust replaces hyphens with underscores in library names
+                    String libNameUnderscore = libName.replace("-native", "_native");
+                    System.out.println("[Bassalt] Also trying with underscore: " + libNameUnderscore);
+
+                    String[] devPaths = {
+                        "bassalt-native/target/release/" + libName,
+                        "bassalt-native/target/release/" + libNameUnderscore,
+                        "../bassalt-native/target/release/" + libName,
+                        "../bassalt-native/target/release/" + libNameUnderscore,
+                        "../../bassalt-native/target/release/" + libName,
+                        "../../bassalt-native/target/release/" + libNameUnderscore
+                    };
+
+                    for (String devPath : devPaths) {
+                        File libFile = new File(devPath);
+                        System.out.println("[Bassalt] Checking path: " + libFile.getAbsolutePath() + " exists: " + libFile.exists());
+                        if (libFile.exists()) {
+                            System.out.println("[Bassalt] Found library at dev path: " + libFile.getAbsolutePath());
+                            System.load(libFile.getAbsolutePath());
+                            loaded = true;
+                            System.out.println("[Bassalt] Native library loaded from: " + devPath);
+                            break;
+                        }
+                    }
+                }
+
+                if (!loaded) {
+                    throw new RuntimeException("Bassalt native library not found in any resource path", firstError);
                 }
             } catch (java.io.IOException e2) {
                 throw new RuntimeException("Failed to load Bassalt native library", e2);
@@ -144,7 +204,9 @@ public class BassaltBackend implements GpuBackend {
         if (this.contextPtr == 0) {
             throw new RuntimeException("Failed to initialize Bassalt renderer");
         }
-        System.out.println("[Bassalt] Backend initialized: " + getAdapterInfo(contextPtr));
+        // TODO: getAdapterInfo is temporarily disabled due to JNI linking issue
+        // System.out.println("[Bassalt] Backend initialized: " + getAdapterInfo(contextPtr));
+        System.out.println("[Bassalt] Backend initialized successfully (contextPtr: " + contextPtr + ")");
     }
 
     @Override

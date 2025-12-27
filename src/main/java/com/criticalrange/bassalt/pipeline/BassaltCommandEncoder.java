@@ -1,6 +1,7 @@
 package com.criticalrange.bassalt.pipeline;
 
 import com.criticalrange.bassalt.backend.BassaltDevice;
+import com.criticalrange.bassalt.buffer.BassaltBuffer;
 import com.criticalrange.bassalt.texture.BassaltTexture;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
@@ -171,14 +172,26 @@ public class BassaltCommandEncoder implements CommandEncoder {
 
     @Override
     public GpuBuffer.@Nullable MappedView mapBuffer(GpuBuffer buffer, boolean read, boolean write) {
-        // TODO: implement proper buffer mapping using wgpu's map_buffer API
-        throw new UnsupportedOperationException("Buffer mapping not yet implemented");
+        BassaltBuffer bassaltBuffer = (BassaltBuffer) buffer;
+        return new com.criticalrange.bassalt.buffer.BassaltMappedView(
+            device,
+            bassaltBuffer,
+            0,  // offset
+            bassaltBuffer.size(),
+            write
+        );
     }
 
     @Override
-    public GpuBuffer.@Nullable MappedView mapBuffer(GpuBufferSlice buffer, boolean read, boolean write) {
-        // TODO: implement proper buffer mapping using wgpu's map_buffer API
-        throw new UnsupportedOperationException("Buffer mapping not yet implemented");
+    public GpuBuffer.@Nullable MappedView mapBuffer(GpuBufferSlice bufferSlice, boolean read, boolean write) {
+        BassaltBuffer bassaltBuffer = (BassaltBuffer) bufferSlice.buffer();
+        return new com.criticalrange.bassalt.buffer.BassaltMappedView(
+            device,
+            bassaltBuffer,
+            bufferSlice.offset(),
+            bufferSlice.length(),
+            write
+        );
     }
 
     @Override

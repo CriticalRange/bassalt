@@ -8,6 +8,8 @@ Bassalt Renderer is a Minecraft Fabric mod targeting Minecraft version 26.1-snap
 
 **Key Architecture Decision**: This mod uses Rust + wgpu-core directly (not wgpu-native's C API) for memory safety and cleaner JNI integration. The native library is compiled as a cdylib and loaded via JNI.
 
+**Important**: The package name is `com.criticalrange.bassalt` (note: bassalt, not basalt).
+
 ## Build Commands
 
 ```bash
@@ -17,11 +19,14 @@ Bassalt Renderer is a Minecraft Fabric mod targeting Minecraft version 26.1-snap
 # Build only the Rust native library (development)
 cd bassalt-native && cargo build --release
 
+# Build debug version of native library
+cd bassalt-native && cargo build
+
 # Clean all build artifacts
 ./gradlew clean
 
-# Build with sources JAR
-./gradlew build
+# Run the mod with Bassalt enabled
+./gradlew runClient -Dbassalt.enabled=true
 ```
 
 **Important**: The build process automatically compiles the Rust native library via cargo before packaging the JAR. The native library (.so/.dll/.dylib) is included in the JAR under `META-INF/native/`.
@@ -91,19 +96,20 @@ com.criticalrange.bassalt/
 ├── Bassaltrenderer.java              # Main mod entry point
 ├── backend/
 │   ├── BassaltBackend.java           # GpuBackend implementation
-│   ├── BassaltDevice.java            # GpuDevice implementation
-│   └── ...
+│   └── BassaltDevice.java            # GpuDevice implementation
 ├── shader/
-│   └── WgslCompiler.java            # GLSL to WGSL shader translation
-├── mixin/
-│   └── BackendSwapMixin.java        # Injects Bassalt into backend array
-└── resources/
-    ├── BassaltBuffer.java
-    ├── BassaltTexture.java
-    ├── BassaltTextureView.java
-    ├── BassaltSampler.java
-    ├── BassaltRenderPass.java
-    └── BassaltCommandEncoder.java
+│   └── WgslCompiler.java             # GLSL to WGSL shader translation
+├── buffer/
+│   └── BassaltBuffer.java            # Buffer wrapper
+├── texture/
+│   ├── BassaltTexture.java
+│   ├── BassaltTextureView.java
+│   └── BassaltSampler.java
+├── pipeline/
+│   ├── BassaltCommandEncoder.java
+│   └── BassaltRenderPass.java
+└── mixin/
+    └── BackendSwapMixin.java         # Injects Bassalt into backend array
 ```
 
 ### Rust Native Library (`bassalt-native/src/`)
@@ -112,7 +118,7 @@ com.criticalrange.bassalt/
 bassalt-native/src/
 ├── lib.rs           # JNI exports and global state management
 ├── jni/
-│   ├── mod.rs       # JNI utility module
+│   ├── mod.rs       # JNI utility module (logging, error conversion)
 │   ├── env.rs       # JNIEnv wrapper
 │   ├── strings.rs   # Java/Rust string conversion
 │   └── handles.rs   # Handle management (jlong <-> pointers)
@@ -192,26 +198,32 @@ Minecraft GLSL shaders are translated to WGSL via naga:
 
 ### Type Mapping: Minecraft → WebGPU
 
-| Minecraft Format | WebGPU Format |
-|-----------------|---------------|
-| FormatRGBA | TextureFormat::Rgba8UnormSrgb |
-| FormatRGB | TextureFormat::Rgb8UnormSrgb |
-| FormatRG | TextureFormat::Rg8Unorm |
-| FormatR | TextureFormat::R8Unorm |
-| FormatRGBA16F | TextureFormat::Rgba16Float |
-| FormatDepth32 | TextureFormat::Depth32Float |
-| FormatDepth24Stencil8 | TextureFormat::Depth24PlusStencil8 |
+The following constants are defined in `BassaltBackend.java`:
+
+| Constant | WebGPU Format |
+|----------|---------------|
+| FORMAT_RGBA8 | TextureFormat::Rgba8UnormSrgb |
+| FORMAT_BGRA8 | TextureFormat::Bgra8UnormSrgb |
+| FORMAT_RGB8 | TextureFormat::Rgb8UnormSrgb |
+| FORMAT_RG8 | TextureFormat::Rg8Unorm |
+| FORMAT_R8 | TextureFormat::R8Unorm |
+| FORMAT_RGBA16F | TextureFormat::Rgba16Float |
+| FORMAT_RGBA32F | TextureFormat::Rgba32Float |
+| FORMAT_DEPTH24 | TextureFormat::Depth24Plus |
+| FORMAT_DEPTH32F | TextureFormat::Depth32Float |
+| FORMAT_DEPTH24_STENCIL8 | TextureFormat::Depth24PlusStencil8 |
 
 ## External Dependencies and References
 
 ### Minecraft Source (`~/26.1-unobfuscated/`)
 
-Fully decompiled Minecraft 26.1 source code for reference:
+Fully decompiled Minecraft 26.1 source code for reference (if available):
 
 **Key GPU Abstraction Classes:**
 - `com.mojang.blaze3d.systems.GpuBackend` - Backend interface
 - `com.mojang.blaze3d.systems.GpuDevice` - Device interface
 - `com.mojang.blaze3d.systems.RenderSystem` - Render state management
+- `com.mojang.blaze3d.shaders.ShaderSource` - Shader management
 - `net.minecraft.client.renderer.*` - Main rendering classes
 
 **Use this to understand:**
@@ -219,20 +231,6 @@ Fully decompiled Minecraft 26.1 source code for reference:
 - How resources are created and managed
 - Rendering pipeline structure
 - Shader format and requirements
-
-### wgpu-native (`~/wgpu-native/`)
-
-Reference implementation for WebGPU in C:
-
-**Key Files:**
-- `ffi/wgpu.h` - C API header (interface reference)
-- `examples/triangle/main.c` - Example usage
-- `Cargo.toml` - Dependency versions (wgpu-core, naga)
-
-**Use this for:**
-- Understanding WebGPU API patterns
-- Surface integration patterns
-- Resource lifecycle management
 
 ## Development Guidelines
 
@@ -243,7 +241,7 @@ Reference implementation for WebGPU in C:
 public native long newNativeMethod(long ptr, int param);
 ```
 
-2. **Rust side**: Add JNI export following naming convention:
+2. **Rust side**: Add JNI export following naming convention in `bassalt-native/src/lib.rs`:
 ```rust
 #[no_mangle]
 pub extern "system" fn Java_com_criticalrange_bassalt_<ClassName>_<MethodName>(
@@ -256,7 +254,8 @@ pub extern "system" fn Java_com_criticalrange_bassalt_<ClassName>_<MethodName>(
 }
 ```
 
-3. **Register in lib.rs**: All JNI exports are in `bassalt-native/src/lib.rs`
+**Note**: JNI function names must match the full Java class path with underscores replacing dots.
+- `com.criticalrange.bassalt.backend.BassaltBackend` becomes `Java_com_criticalrange_bassalt_backend_BassaltBackend`
 
 ### Adding New Mixins
 
@@ -274,8 +273,11 @@ pub extern "system" fn Java_com_criticalrange_bassalt_<ClassName>_<MethodName>(
 ### Debugging Native Code
 
 ```bash
-# Enable Rust logging
-RUST_LOG=debug ./gradlew runClient
+# Enable Rust debug logging (via BASALT_DEBUG env var)
+BASALT_DEBUG=1 ./gradlew runClient -Dbassalt.enabled=true
+
+# Or use RUST_LOG for more control
+RUST_LOG=debug ./gradlew runClient -Dbassalt.enabled=true
 
 # Build with debug symbols
 cd bassalt-native && cargo build
@@ -295,8 +297,9 @@ Mod versions and dependencies are managed in `gradle.properties`:
 
 Rust dependencies are in `bassalt-native/Cargo.toml`:
 - `wgpu-core = "27.0"` - Core WebGPU implementation
+- `wgpu-hal = "27.0"` - Hardware abstraction layer
 - `naga = "27.0"` - Shader translation
-- `jni = "0.22"` - JNI bindings
+- `jni = "0.21"` - JNI bindings (note: 0.21, not 0.22)
 
 ## Known Limitations
 
@@ -304,6 +307,13 @@ Rust dependencies are in `bassalt-native/Cargo.toml`:
 2. **Compute Shaders**: Not yet implemented in native layer
 3. **Multisampling**: Basic MSAA support only
 4. **Bindless Resources**: Uses bind groups (not bindless textures)
+
+## Important Notes
+
+- **Package naming**: The Java package is `com.criticalrange.bassalt` but the native library is named `libbassalt_native`
+- **Resource ID pattern**: wgpu-core uses resource IDs (like `BufferId`, `TextureId`) which are converted to/from `jlong` handles
+- **Arc usage**: The global context uses `Arc` for reference counting; when extracting from raw pointers, remember to re-clone or forget as appropriate
+- **GLSL preprocessing**: Minecraft's shader format requires preprocessing (removing `#version`, `#moj_import`, precision qualifiers) before naga translation
 
 ## Future Enhancements
 

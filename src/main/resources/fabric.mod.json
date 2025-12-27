@@ -5,10 +5,10 @@
 	"name": "Bassalt Renderer",
 	"description": "A custom WebGPU-based renderer for Minecraft using wgpu-core",
 	"authors": [
-		"criticalrange"
+		"CriticalRange"
 	],
 	"contact": {
-		"homepage": "https://github.com/criticalrange/bassalt"
+		"homepage": "https://github.com/CriticalRange/bassalt"
 	},
 	"license": "MIT",
 	"icon": "assets/bassaltrenderer/icon.png",
@@ -26,5 +26,8 @@
 		"minecraft": "~26.1-",
 		"java": ">=25",
 		"fabric-api": "*"
+	},
+	"custom": {
+		"fabric-renderer-api-v1:contains_renderer": true
 	}
 }

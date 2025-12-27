@@ -56,8 +56,9 @@ public class BassaltDevice implements GpuDevice {
     private static native void destroyTexture(long ptr, long texturePtr);
 
     // Sampler operations
-    private static native long createSampler(long ptr, int addressModeU, int addressModeV,
-                                             int minFilter, int magFilter, int maxAnisotropy);
+    private static native long createSampler(long ptr, int addressModeU, int addressModeV, int addressModeW,
+                                             int minFilter, int magFilter, int mipmapFilter,
+                                             float lodMinClamp, float lodMaxClamp, int maxAnisotropy);
 
     // Pipeline operations
     private static native long createRenderPipeline(long ptr, String vertexShader, String fragmentShader,
@@ -65,6 +66,13 @@ public class BassaltDevice implements GpuDevice {
                                                      boolean depthTestEnabled, boolean depthWriteEnabled,
                                                      int depthCompare, boolean blendEnabled,
                                                      int blendColorFactor, int blendAlphaFactor);
+
+    // Create pipeline from pre-converted WGSL (for offline shader conversion)
+    private static native long createNativePipelineFromWgsl(long ptr, String vertexWgsl, String fragmentWgsl,
+                                                             int vertexFormat, int primitiveTopology,
+                                                             boolean depthTestEnabled, boolean depthWriteEnabled,
+                                                             int depthCompare, boolean blendEnabled,
+                                                             int blendColorFactor, int blendAlphaFactor);
 
     // Render pass operations
     public static native long beginRenderPass(long ptr, long colorTexture, long depthTexture,
@@ -117,8 +125,12 @@ public class BassaltDevice implements GpuDevice {
             nativePtr,
             toBassaltAddressMode(addressModeU),
             toBassaltAddressMode(addressModeV),
+            toBassaltAddressMode(addressModeU),  // addressModeW - use U for now
             toBassaltFilterMode(minFilter),
             toBassaltFilterMode(magFilter),
+            toBassaltFilterMode(minFilter),  // mipmapFilter - use minFilter for now
+            0.0f,  // lodMinClamp
+            (float)maxLod.orElse(1000.0),  // lodMaxClamp
             maxAnisotropy
         );
         return new BassaltSampler(ptr, addressModeU, addressModeV, minFilter, magFilter,
@@ -239,15 +251,145 @@ public class BassaltDevice implements GpuDevice {
             return cached;
         }
 
-        // For now, create a placeholder pipeline
-        // TODO: Implement full pipeline compilation with:
-        // 1. Getting shaders from shaderSource or pipeline
-        // 2. Translating GLSL to WGSL
-        // 3. Creating the WebGPU render pipeline
-        BassaltCompiledRenderPipeline compiled = new BassaltCompiledRenderPipeline(this, 0);
+        System.out.println("[Bassalt] Compiling pipeline: " + pipeline.getLocation());
+        System.out.println("[Bassalt]   Vertex: " + pipeline.getVertexShader());
+        System.out.println("[Bassalt]   Fragment: " + pipeline.getFragmentShader());
+
+        // Try to load pre-converted WGSL shaders
+        String vertexWgsl = loadPreconvertedWgsl(pipeline.getVertexShader(), "vert");
+        String fragmentWgsl = loadPreconvertedWgsl(pipeline.getFragmentShader(), "frag");
+
+        if (vertexWgsl == null || fragmentWgsl == null) {
+            System.err.println("[Bassalt] Failed to load pre-converted WGSL shaders");
+            System.err.println("[Bassalt]   Vertex WGSL: " + (vertexWgsl != null ? "loaded" : "NOT FOUND"));
+            System.err.println("[Bassalt]   Fragment WGSL: " + (fragmentWgsl != null ? "loaded" : "NOT FOUND"));
+            // Return invalid pipeline
+            BassaltCompiledRenderPipeline compiled = new BassaltCompiledRenderPipeline(this, 0);
+            pipelineCache.put(cacheKey, compiled);
+            return compiled;
+        }
+
+        System.out.println("[Bassalt]   Loaded pre-converted WGSL shaders");
+
+        // Get pipeline properties
+        int vertexFormat = getVertexFormatIndex(pipeline.getVertexFormat());
+        int primitiveTopology = getVertexFormatModeIndex(pipeline.getVertexFormatMode());
+        boolean depthTestEnabled = pipeline.getDepthTestFunction() != com.mojang.blaze3d.platform.DepthTestFunction.NO_DEPTH_TEST;
+        boolean depthWriteEnabled = pipeline.isWriteDepth();
+        int depthCompare = getDepthCompareFunction(pipeline.getDepthTestFunction());
+        boolean blendEnabled = pipeline.getBlendFunction().isPresent();
+        int blendColorFactor = blendEnabled ? getBlendFactorIndex(pipeline.getBlendFunction().get().sourceColor()) : 0;
+        int blendAlphaFactor = blendEnabled ? getBlendFactorIndex(pipeline.getBlendFunction().get().sourceAlpha()) : 0;
+
+        // Create the native pipeline from WGSL
+        long nativePipelinePtr = createNativePipelineFromWgsl(
+            nativePtr,
+            vertexWgsl,
+            fragmentWgsl,
+            vertexFormat,
+            primitiveTopology,
+            depthTestEnabled,
+            depthWriteEnabled,
+            depthCompare,
+            blendEnabled,
+            blendColorFactor,
+            blendAlphaFactor
+        );
+
+        BassaltCompiledRenderPipeline compiled = new BassaltCompiledRenderPipeline(this, nativePipelinePtr);
         pipelineCache.put(cacheKey, compiled);
 
+        if (nativePipelinePtr != 0) {
+            System.out.println("[Bassalt]   ✓ Pipeline compiled successfully");
+        } else {
+            System.err.println("[Bassalt]   ✗ Pipeline compilation failed (native ptr = 0)");
+        }
+
         return compiled;
+    }
+
+    /**
+     * Load a pre-converted WGSL shader from resources
+     */
+    private String loadPreconvertedWgsl(net.minecraft.resources.Identifier shaderId, String stage) {
+        // Convert shader ID to path: "minecraft:core/gui" -> "shaders/wgsl/core/gui.wgsl"
+        String shaderPath = shaderId.getPath(); // Returns "core/gui"
+        String resourcePath = "shaders/wgsl/" + shaderPath + ".wgsl"; // Results in "shaders/wgsl/core/gui.wgsl"
+
+        try (var input = getClass().getResourceAsStream("/" + resourcePath)) {
+            if (input == null) {
+                return null;
+            }
+            return new String(input.readAllBytes());
+        } catch (java.io.IOException e) {
+            System.err.println("[Bassalt] Error loading WGSL shader " + resourcePath + ": " + e);
+            return null;
+        }
+    }
+
+    // Helper methods to convert Minecraft enums to Bassalt constants
+    private int getVertexFormatIndex(com.mojang.blaze3d.vertex.VertexFormat format) {
+        // Map vertex format to Bassalt vertex format index
+        // 0 = POSITION (3 floats)
+        // 1 = POSITION_COLOR (3 floats + 4 floats)
+        // 2 = POSITION_TEX (3 floats + 2 floats)
+        // 3 = POSITION_TEX_COLOR (3 floats + 2 floats + 4 floats)
+        // 4 = POSITION_TEX_COLOR_NORMAL (3 floats + 2 floats + 4 floats + 3 floats)
+        String name = format.toString().toLowerCase();
+        return switch (name) {
+            case "position" -> 0;
+            case "position_color" -> 1;
+            case "position_tex" -> 2;
+            case "position_tex_color" -> 3;
+            case "position_tex_color_normal" -> 4;
+            default -> {
+                System.err.println("[Bassalt] Unknown vertex format: " + name + ", defaulting to position_tex_color");
+                yield 3;
+            }
+        };
+    }
+
+    private int getVertexFormatModeIndex(com.mojang.blaze3d.vertex.VertexFormat.Mode mode) {
+        // Map VertexFormat.Mode to primitive topology
+        return switch (mode) {
+            case POINTS -> BassaltBackend.PRIMITIVE_TOPOLOGY_POINT_LIST;
+            case LINES -> BassaltBackend.PRIMITIVE_TOPOLOGY_LINE_LIST;
+            case TRIANGLES -> BassaltBackend.PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+            case TRIANGLE_STRIP -> BassaltBackend.PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+            // For quad rendering, we'll use triangle list (quad conversion happens elsewhere)
+            case QUADS -> BassaltBackend.PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+            // Line strip and debug modes fall back to line list
+            case DEBUG_LINE_STRIP, DEBUG_LINES -> BassaltBackend.PRIMITIVE_TOPOLOGY_LINE_LIST;
+            // Triangle fan isn't directly supported, fall back to triangle list
+            case TRIANGLE_FAN -> BassaltBackend.PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        };
+    }
+
+    private int getDepthCompareFunction(com.mojang.blaze3d.platform.DepthTestFunction function) {
+        return switch (function) {
+            case NO_DEPTH_TEST -> BassaltBackend.COMPARE_FUNC_ALWAYS;
+            case EQUAL_DEPTH_TEST -> BassaltBackend.COMPARE_FUNC_EQUAL;
+            case LEQUAL_DEPTH_TEST -> BassaltBackend.COMPARE_FUNC_LESS_EQUAL;
+            case LESS_DEPTH_TEST -> BassaltBackend.COMPARE_FUNC_LESS;
+            case GREATER_DEPTH_TEST -> BassaltBackend.COMPARE_FUNC_GREATER;
+        };
+    }
+
+    private int getBlendFactorIndex(com.mojang.blaze3d.platform.SourceFactor factor) {
+        return switch (factor) {
+            case ZERO -> BassaltBackend.BLEND_FACTOR_ZERO;
+            case ONE -> BassaltBackend.BLEND_FACTOR_ONE;
+            case SRC_COLOR -> BassaltBackend.BLEND_FACTOR_SRC;
+            case ONE_MINUS_SRC_COLOR -> BassaltBackend.BLEND_FACTOR_ONE_MINUS_SRC;
+            case DST_COLOR -> BassaltBackend.BLEND_FACTOR_DST;
+            case ONE_MINUS_DST_COLOR -> BassaltBackend.BLEND_FACTOR_ONE_MINUS_DST;
+            case SRC_ALPHA -> BassaltBackend.BLEND_FACTOR_SRC_ALPHA;
+            case ONE_MINUS_SRC_ALPHA -> BassaltBackend.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            case DST_ALPHA -> BassaltBackend.BLEND_FACTOR_DST_ALPHA;
+            case ONE_MINUS_DST_ALPHA -> BassaltBackend.BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+            case CONSTANT_COLOR, CONSTANT_ALPHA, ONE_MINUS_CONSTANT_COLOR, ONE_MINUS_CONSTANT_ALPHA, SRC_ALPHA_SATURATE ->
+                BassaltBackend.BLEND_FACTOR_ONE; // Fallback for less common factors
+        };
     }
 
     @Override
@@ -328,6 +470,11 @@ public class BassaltDevice implements GpuDevice {
         if ((minecraftUsage & 0x80) != 0) usage |= BassaltBackend.BUFFER_USAGE_UNIFORM;
         if ((minecraftUsage & 0x200) != 0) usage |= BassaltBackend.BUFFER_USAGE_STORAGE;
         if ((minecraftUsage & 0x08) != 0) usage |= BassaltBackend.BUFFER_USAGE_INDIRECT;
+
+        // WebGPU requires COPY_DST to upload buffer data, but OpenGL doesn't distinguish.
+        // Always add COPY_DST so we can write to any buffer (like OpenGL).
+        usage |= BassaltBackend.BUFFER_USAGE_COPY_DST;
+
         return usage;
     }
 
@@ -347,6 +494,12 @@ public class BassaltDevice implements GpuDevice {
         if ((minecraftUsage & 0x04) != 0) usage |= BassaltBackend.TEXTURE_USAGE_TEXTURE_BINDING;
         if ((minecraftUsage & 0x08) != 0) usage |= BassaltBackend.TEXTURE_USAGE_STORAGE_BINDING;
         if ((minecraftUsage & 0x10) != 0) usage |= BassaltBackend.TEXTURE_USAGE_RENDER_ATTACHMENT;
+
+        // WebGPU requires COPY_DST to upload texture data, but OpenGL doesn't distinguish.
+        // Always add COPY_DST so we can write to any texture (like OpenGL).
+        // This is safe and matches OpenGL's "any texture can be uploaded to" behavior.
+        usage |= BassaltBackend.TEXTURE_USAGE_COPY_DST;
+
         return usage;
     }
 

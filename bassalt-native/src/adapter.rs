@@ -1,5 +1,6 @@
 //! GPU adapter handling
 
+use std::borrow::Cow;
 use std::sync::Arc;
 use wgpu_core::id;
 use wgpu_types as wgt;
@@ -36,24 +37,13 @@ impl BasaltAdapter {
     /// Request a device from this adapter
     pub fn request_device(
         &self,
-        desc: &wgt::DeviceDescriptor,
+        desc: &wgt::DeviceDescriptor<Option<Cow<'_, str>>>,
     ) -> Result<(id::DeviceId, id::QueueId)> {
-        let (device_id, error) = self
+        let (device_id, queue_id) = self
             .context
             .inner()
-            .request_device(self.adapter_id, desc, None);
-
-        let device_id = device_id.ok_or_else(|| {
-            error.map_or_else(
-                || crate::error::BasaltError::Device("Unknown device error".into()),
-                |e| crate::error::BasaltError::Device(format!("{:?}", e)),
-            )
-        })?;
-
-        let queue_id = self
-            .context
-            .inner()
-            .device_get_queue(device_id);
+            .adapter_request_device(self.adapter_id, desc, None, None)
+            .map_err(|e| crate::error::BasaltError::Device(format!("{:?}", e)))?;
 
         Ok((device_id, queue_id))
     }

@@ -1,12 +1,12 @@
 package com.criticalrange.bassalt.mixin;
 
 import com.criticalrange.bassalt.backend.BassaltBackend;
-import com.mojang.blaze3d.opengl.GlBackend;
+import com.mojang.blaze3d.platform.Window;
 import com.mojang.blaze3d.systems.GpuBackend;
-import net.minecraft.client.Minecraft;
+import com.mojang.blaze3d.opengl.GlBackend;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
-import org.spongepowered.asm.mixin.injection.ModifyArg;
+import org.spongepowered.asm.mixin.injection.ModifyVariable;
 
 /**
  * Mixin to inject BassaltBackend into the backend array
@@ -14,31 +14,26 @@ import org.spongepowered.asm.mixin.injection.ModifyArg;
  * This mixin modifies the backend array used by Minecraft to include
  * BassaltRenderer as the first option, falling back to OpenGL if it fails.
  */
-@Mixin(Minecraft.class)
+@Mixin(Window.class)
 public class BackendSwapMixin {
 
     /**
-     * Modify the GpuBackend array to include Bassalt as the first option
-     * Original: new GpuBackend[]{new GlBackend()}
-     * Modified: new GpuBackend[]{new BassaltBackend(), new GlBackend()}
+     * Modify the backends array parameter in Window constructor
+     * Uses @ModifyVariable at HEAD to modify the parameter before the constructor body runs
+     *
+     * Based on: https://wiki.fabricmc.net/tutorial:mixin_examples
      */
-    @ModifyArg(
+    @ModifyVariable(
         method = "<init>",
-        at = @At(
-            value = "INVOKE",
-            target = "Lcom/mojang/blaze3d/platform/Window;<init>*",
-            shift = At.Shift.AFTER
-        ),
-        index = 0  // First argument to the Window constructor (the backend array)
+        at = @At("HEAD"),
+        argsOnly = true
     )
-    private static GpuBackend[] bassalt$addBassaltBackend(GpuBackend[] original) {
-        // Only inject Bassalt if enabled via system property
+    private static GpuBackend[] bassalt$modifyBackendsArray(GpuBackend[] original) {
+        System.out.println("[Bassalt] Modifying backends array in Window constructor");
+        System.out.println("[Bassalt] bassalt.enabled property: " + System.getProperty("bassalt.enabled"));
         if (Boolean.getBoolean("bassalt.enabled")) {
-            System.out.println("[Bassalt] Injecting Bassalt backend into backend array");
-            return new GpuBackend[]{
-                new BassaltBackend(),  // Try Bassalt first
-                new GlBackend()        // Fallback to OpenGL
-            };
+            System.out.println("[Bassalt] Injecting Bassalt backend into array");
+            return new GpuBackend[]{new BassaltBackend(), new GlBackend()};
         }
         return original;
     }

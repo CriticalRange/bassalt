@@ -22,8 +22,54 @@ def getNativeLibraryExtension() {
 	return ".so"
 }
 
+// Task to convert GLSL shaders to WGSL using our Rust binary
+task convertShaders(type: Exec) {
+	dependsOn 'buildShaderConverter'
+
+	workingDir file(".")
+	def extension = getNativeLibraryExtension()
+	def converterName = extension == ".dll" ? "shader_converter.exe" : "shader_converter"
+
+	def converterPath = file("bassalt-native/target/release/${converterName}")
+
+	// Build converter if it doesn't exist or is out of date
+	outputs.dir("src/main/resources/shaders/wgsl")
+	inputs.dir("src/main/resources/shaders/core")
+	inputs.dir("src/main/resources/shaders/include")
+
+	def inputDir = file("src/main/resources/shaders").absolutePath
+	def outputDir = file("src/main/resources/shaders/wgsl").absolutePath
+
+	commandLine converterPath, inputDir, outputDir
+
+	// Make sure converter is built first
+	doFirst {
+		if (!converterPath.exists()) {
+			throw new GradleException("Shader converter not found at ${converterPath}. Run 'cargo build --release --bin shader_converter' in bassalt-native directory first.")
+		}
+	}
+}
+
+// Task to build the shader converter binary
+task buildShaderConverter(type: Exec) {
+	workingDir file("bassalt-native")
+
+	// Build only the shader_converter binary
+	def extension = getNativeLibraryExtension()
+	def converterName = extension == ".dll" ? "shader_converter.exe" : "shader_converter"
+
+	if (System.getProperty("os.name").toLowerCase().contains("mac")) {
+		environment "MACOSX_DEPLOYMENT_TARGET", "10.15"
+	}
+
+	commandLine "cargo", "build", "--release", "--bin", "shader_converter"
+
+	inputs.dir("bassalt-native/src/bin")
+	outputs.file("bassalt-native/target/release/${converterName}")
+}
+
 // Task to build the Rust native library
-task buildNative(type: Exec) {
+task buildNative(type: Exec, dependsOn: convertShaders) {
 	workingDir file("bassalt-native")
 	def cargoArgs = ["build", "--release"]
 	if (System.getProperty("os.name").toLowerCase().contains("mac")) {
@@ -58,6 +104,9 @@ tasks.named('build') {
 	dependsOn copyNativeLibrary
 }
 
+// Make sure processResources runs after shader conversion
+processResources.dependsOn convertShaders
+
 dependencies {
 	// To change the versions see the gradle.properties file
 	minecraft "com.mojang:minecraft:${project.minecraft_version}"
@@ -91,11 +140,26 @@ java {
 	targetCompatibility = JavaVersion.VERSION_25
 }
 
+// Make sure sourcesJar also depends on shader conversion
+tasks.named('sourcesJar') {
+	dependsOn convertShaders
+}
+
 jar {
 	inputs.property "archivesName", project.base.archivesName
 
 	from("LICENSE") {
 		rename { "${it}_${inputs.properties.archivesName}"}
+	}
+}
+
+// Pass system properties to the runClient task
+tasks.named('runClient') {
+	// Pass all system properties that start with "bassalt."
+	System.getProperties().each { key, value ->
+		if (key.toString().startsWith("bassalt.")) {
+			jvmArgs("-D${key}=${value}")
+		}
 	}
 }
 
