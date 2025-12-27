@@ -1,0 +1,30 @@
+{
+	"schemaVersion": 1,
+	"id": "bassaltrenderer",
+	"version": "${version}",
+	"name": "Bassalt Renderer",
+	"description": "A custom WebGPU-based renderer for Minecraft using wgpu-core",
+	"authors": [
+		"criticalrange"
+	],
+	"contact": {
+		"homepage": "https://github.com/criticalrange/bassalt"
+	},
+	"license": "MIT",
+	"icon": "assets/bassaltrenderer/icon.png",
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+			"com.criticalrange.Bassaltrenderer"
+		]
+	},
+	"mixins": [
+		"basaltrenderer.mixins.json"
+	],
+	"depends": {
+		"fabricloader": ">=0.18.4",
+		"minecraft": "~26.1-",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}

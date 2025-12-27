@@ -1,0 +1,15 @@
+{
+	"required": false,
+	"package": "com.criticalrange.bassalt.mixin",
+	"compatibilityLevel": "JAVA_25",
+	"mixins": [
+		"BackendSwapMixin"
+	],
+	"client": [],
+	"injectors": {
+		"defaultRequire": 1
+	},
+	"overwrites": {
+		"requireAnnotations": true
+	}
+}
