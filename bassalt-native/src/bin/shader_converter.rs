@@ -6,67 +6,76 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::collections::HashSet;
 
-fn find_moj_imports(source: &str) -> Vec<String> {
-    let mut imports = Vec::new();
-    for line in source.lines() {
-        if line.contains("#moj_import") {
-            if let Some(start) = line.find('<') {
-                if let Some(end) = line.find('>') {
-                    if end > start {
-                        imports.push(line[start + 1..end].to_string());
-                    }
-                }
-            }
-        }
-    }
-    imports
-}
-
 fn preprocess_file(source: &str, include_dir: &Path, visited: &mut HashSet<PathBuf>) -> String {
-    let imports = find_moj_imports(source);
     let mut result = String::new();
 
-    // Add original source lines (excluding #version and #moj_import)
+    // Process line by line, inserting imports inline where #moj_import directives appear
     for line in source.lines() {
         if line.trim_start().starts_with("#version") {
             continue; // Skip #version
         }
-        if line.trim_start().starts_with("#moj_import") {
-            continue; // Skip moj_import, we'll handle it below
-        }
         if line.trim().starts_with("precision ") {
             continue; // Skip precision qualifiers
         }
-        result.push_str(line);
-        result.push('\n');
-    }
 
-    // Process imports
-    for import in &imports {
-        if import.starts_with("minecraft:") {
-            let filename = import.replace("minecraft:", "");
-            let full_path = include_dir.join(&filename);
+        // Skip preprocessor conditionals that naga doesn't fully support
+        // These will be handled by shader defines in the pipeline
+        if line.trim_start().starts_with("#if") ||
+           line.trim_start().starts_with("#else") ||
+           line.trim_start().starts_with("#endif") {
+            result.push_str(&format!("// {}\n", line.trim()));
+            continue;
+        }
 
-            if visited.contains(&full_path) {
-                result.push_str(&format!("// Already included: {}\n", import));
-                continue;
-            }
+        // Handle #moj_import directives - insert imported content inline
+        if line.trim_start().starts_with("#moj_import") {
+            if let Some(start) = line.find('<') {
+                if let Some(end) = line.find('>') {
+                    if end > start {
+                        let import = &line[start + 1..end];
 
-            if full_path.exists() {
-                visited.insert(full_path.clone());
-                match fs::read_to_string(&full_path) {
-                    Ok(included_source) => {
-                        result.push_str(&format!("// Import: {}\n", import));
-                        result.push_str(&preprocess_file(&included_source, include_dir, visited));
-                    }
-                    Err(e) => {
-                        result.push_str(&format!("// Error reading {}: {}\n", filename, e));
+                        if import.starts_with("minecraft:") {
+                            let filename = import.replace("minecraft:", "");
+                            let full_path = include_dir.join(&filename);
+
+                            if visited.contains(&full_path) {
+                                result.push_str(&format!("// Already included: {}\n", import));
+                                continue;
+                            }
+
+                            if full_path.exists() {
+                                visited.insert(full_path.clone());
+                                match fs::read_to_string(&full_path) {
+                                    Ok(included_source) => {
+                                        result.push_str(&format!("// Import: {}\n", import));
+                                        // Recursively preprocess the included file
+                                        result.push_str(&preprocess_file(&included_source, include_dir, visited));
+                                    }
+                                    Err(e) => {
+                                        result.push_str(&format!("// Error reading {}: {}\n", filename, e));
+                                    }
+                                }
+                            } else {
+                                result.push_str(&format!("// Missing file: {}\n", filename));
+                            }
+                        }
                     }
                 }
-            } else {
-                result.push_str(&format!("// Missing file: {}\n", filename));
             }
+            continue; // Don't add the #moj_import line itself
         }
+
+        // Strip unsupported interpolation qualifiers (flat, smooth, centroid, noperspective)
+        // Naga's GLSL parser doesn't support these
+        let line = line
+            .replace("flat ", "")
+            .replace("smooth ", "")
+            .replace("centroid ", "")
+            .replace("noperspective ", "");
+
+        // Add normal line
+        result.push_str(&line);
+        result.push('\n');
     }
 
     result
@@ -176,8 +185,7 @@ fn process_shader(input_path: &Path, output_path: &Path, include_dir: &Path) -> 
 fn create_stub_wgsl(stage: naga::ShaderStage) -> String {
     match stage {
         naga::ShaderStage::Vertex => {
-            r#"// Stub shader - GLSL conversion failed
-// This file contains both vertex and fragment stages
+            r#"// Stub vertex shader - GLSL conversion failed
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -207,35 +215,18 @@ var<uniform> dynamic_transforms: DynamicTransforms;
 var<uniform> projection: Projection;
 
 @vertex
-fn main_vs(in: VertexInput) -> VertexOutput {
+fn main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.position = projection.ProjMat * dynamic_transforms.ModelViewMat * vec4<f32>(in.position, 1.0);
     out.vertex_color = in.color;
     return out;
-}
-
-struct FragmentInput {
-    @location(0) vertex_color: vec4<f32>,
-}
-
-@fragment
-fn main_fs(in: FragmentInput) -> @location(0) vec4<f32> {
-    return in.vertex_color * dynamic_transforms.ColorModulator;
 }
 "#.to_string()
         }
         naga::ShaderStage::Fragment => {
-            // For fragment shaders, we still create the complete file
-            r#"// Stub shader - GLSL conversion failed
-// This file contains both vertex and fragment stages
+            r#"// Stub fragment shader - GLSL conversion failed
 
-struct VertexInput {
-    @location(0) position: vec3<f32>,
-    @location(1) color: vec4<f32>,
-}
-
-struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
+struct FragmentInput {
     @location(0) vertex_color: vec4<f32>,
 }
 
@@ -246,30 +237,11 @@ struct DynamicTransforms {
     TextureMat: mat4x4<f32>,
 }
 
-struct Projection {
-    ProjMat: mat4x4<f32>,
-}
-
 @group(0) @binding(0)
 var<uniform> dynamic_transforms: DynamicTransforms;
 
-@group(0) @binding(1)
-var<uniform> projection: Projection;
-
-@vertex
-fn main_vs(in: VertexInput) -> VertexOutput {
-    var out: VertexOutput;
-    out.position = projection.ProjMat * dynamic_transforms.ModelViewMat * vec4<f32>(in.position, 1.0);
-    out.vertex_color = in.color;
-    return out;
-}
-
-struct FragmentInput {
-    @location(0) vertex_color: vec4<f32>,
-}
-
 @fragment
-fn main_fs(in: FragmentInput) -> @location(0) vec4<f32> {
+fn main(in: FragmentInput) -> @location(0) vec4<f32> {
     return in.vertex_color * dynamic_transforms.ColorModulator;
 }
 "#.to_string()
@@ -317,11 +289,19 @@ fn main() -> Result<(), String> {
             let entry = entry.map_err(|e| format!("Failed to read dir entry: {}", e))?;
             let path = entry.path();
 
-            if path.extension().and_then(|e| e.to_str()) == Some("vsh") ||
-               path.extension().and_then(|e| e.to_str()) == Some("fsh") {
+            let stage_ext = path.extension().and_then(|e| e.to_str());
+            if stage_ext == Some("vsh") || stage_ext == Some("fsh") {
+                // Determine output file suffix based on shader stage
+                let suffix = match stage_ext {
+                    Some("vsh") => "vert.wgsl",
+                    Some("fsh") => "frag.wgsl",
+                    _ => "wgsl",
+                };
+
                 let output_file = output_dir.join("core").join(format!(
-                    "{}.wgsl",
-                    path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown")
+                    "{}.{}",
+                    path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown"),
+                    suffix
                 ));
 
                 // Skip if WGSL file already exists (preserves manual implementations)

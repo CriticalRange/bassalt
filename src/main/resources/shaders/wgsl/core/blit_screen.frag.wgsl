@@ -1,17 +1,20 @@
-// Blit screen fragment shader
-// Converted from blit_screen.fsh
+// Stub fragment shader - GLSL conversion failed
 
 struct FragmentInput {
-    @location(0) tex_coord: vec2<f32>,
+    @location(0) vertex_color: vec4<f32>,
 }
 
-@group(0) @binding(2)
-var in_sampler_texture: texture_2d<f32>;
+struct DynamicTransforms {
+    ModelViewMat: mat4x4<f32>,
+    ColorModulator: vec4<f32>,
+    ModelOffset: vec3<f32>,
+    TextureMat: mat4x4<f32>,
+}
 
-@group(0) @binding(3)
-var in_sampler: sampler;
+@group(0) @binding(0)
+var<uniform> dynamic_transforms: DynamicTransforms;
 
 @fragment
-fn main_fs(in: FragmentInput) -> @location(0) vec4<f32> {
-    return textureSample(in_sampler_texture, in_sampler, in.tex_coord);
+fn main(in: FragmentInput) -> @location(0) vec4<f32> {
+    return in.vertex_color * dynamic_transforms.ColorModulator;
 }

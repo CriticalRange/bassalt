@@ -1,21 +1,36 @@
-// Screen quad vertex shader
-// Converted from screenquad.vsh
+// Stub vertex shader - GLSL conversion failed
+
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) color: vec4<f32>,
+}
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
-    @location(0) tex_coord: vec2<f32>,
+    @location(0) vertex_color: vec4<f32>,
 }
 
+struct DynamicTransforms {
+    ModelViewMat: mat4x4<f32>,
+    ColorModulator: vec4<f32>,
+    ModelOffset: vec3<f32>,
+    TextureMat: mat4x4<f32>,
+}
+
+struct Projection {
+    ProjMat: mat4x4<f32>,
+}
+
+@group(0) @binding(0)
+var<uniform> dynamic_transforms: DynamicTransforms;
+
+@group(0) @binding(1)
+var<uniform> projection: Projection;
+
 @vertex
-fn main_vs(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
+fn main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    // Generate fullscreen triangle/quad UVs from vertex index
-    let uv = vec2<f32>(
-        f32((vertex_index << 1u) & 2u),
-        f32(vertex_index & 2u)
-    );
-    let pos = vec4<f32>(uv * vec2<f32>(2.0, 2.0) + vec2<f32>(-1.0, -1.0), 0.0, 1.0);
-    out.position = pos;
-    out.tex_coord = uv;
+    out.position = projection.ProjMat * dynamic_transforms.ModelViewMat * vec4<f32>(in.position, 1.0);
+    out.vertex_color = in.color;
     return out;
 }

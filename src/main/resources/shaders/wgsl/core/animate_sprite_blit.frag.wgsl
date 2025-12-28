@@ -1,21 +1,20 @@
-// Animate sprite blit fragment shader
-// Converted from animate_sprite_blit.fsh
-// Uses bindings 2 and 3 to avoid conflict with vertex shader's uniform at binding 0
-// Input matches animate_sprite.vert.wgsl outputs
+// Stub fragment shader - GLSL conversion failed
 
 struct FragmentInput {
-    // Match vertex shader outputs:
-    @location(0) animation_progress: f32,  // Unused but must match VS output
-    @location(1) tex_coord0: vec2<f32>,
+    @location(0) vertex_color: vec4<f32>,
 }
 
-@group(0) @binding(2)
-var sprite_texture: texture_2d<f32>;
+struct DynamicTransforms {
+    ModelViewMat: mat4x4<f32>,
+    ColorModulator: vec4<f32>,
+    ModelOffset: vec3<f32>,
+    TextureMat: mat4x4<f32>,
+}
 
-@group(0) @binding(3)
-var sprite_sampler: sampler;
+@group(0) @binding(0)
+var<uniform> dynamic_transforms: DynamicTransforms;
 
 @fragment
-fn main_fs(in: FragmentInput) -> @location(0) vec4<f32> {
-    return textureSample(sprite_texture, sprite_sampler, in.tex_coord0);
+fn main(in: FragmentInput) -> @location(0) vec4<f32> {
+    return in.vertex_color * dynamic_transforms.ColorModulator;
 }

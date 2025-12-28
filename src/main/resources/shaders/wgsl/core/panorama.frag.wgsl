@@ -1,18 +1,20 @@
-// Panorama fragment shader
-// Converted from panorama.fsh
-// Note: Uses cubemap sampler - simplified to 2D for now
+// Stub fragment shader - GLSL conversion failed
 
 struct FragmentInput {
-    @location(0) tex_coord0: vec3<f32>,
+    @location(0) vertex_color: vec4<f32>,
 }
 
-@group(0) @binding(2)
-var panorama_texture: texture_cube<f32>;
+struct DynamicTransforms {
+    ModelViewMat: mat4x4<f32>,
+    ColorModulator: vec4<f32>,
+    ModelOffset: vec3<f32>,
+    TextureMat: mat4x4<f32>,
+}
 
-@group(0) @binding(3)
-var panorama_sampler: sampler;
+@group(0) @binding(0)
+var<uniform> dynamic_transforms: DynamicTransforms;
 
 @fragment
-fn main_fs(in: FragmentInput) -> @location(0) vec4<f32> {
-    return textureSample(panorama_texture, panorama_sampler, in.tex_coord0);
+fn main(in: FragmentInput) -> @location(0) vec4<f32> {
+    return in.vertex_color * dynamic_transforms.ColorModulator;
 }

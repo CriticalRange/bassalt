@@ -20,6 +20,8 @@ pub enum BindingEntry {
         view_id: id::TextureViewId,
         sampler_id: Option<id::SamplerId>,
         dimension: wgt::TextureViewDimension,
+        /// The underlying texture, used to create views with different dimensions
+        texture_id: id::TextureId,
     },
     UniformBuffer {
         buffer_id: id::BufferId,
@@ -48,17 +50,18 @@ impl BindGroupBuilder {
         }
     }
 
-    /// Add a texture binding with explicit dimension
+    /// Add a texture binding with explicit dimension and texture_id for re-view creation
     pub fn add_texture(
         mut self,
         binding: u32,
         view_id: id::TextureViewId,
         sampler_id: Option<id::SamplerId>,
         dimension: wgt::TextureViewDimension,
+        texture_id: id::TextureId,
     ) -> Self {
         self.entries.push((
             binding,
-            BindingEntry::Texture { view_id, sampler_id, dimension },
+            BindingEntry::Texture { view_id, sampler_id, dimension, texture_id },
         ));
         self
     }
@@ -94,7 +97,7 @@ impl BindGroupBuilder {
 
         for (binding, entry) in &self.entries {
             match entry {
-                BindingEntry::Texture { view_id, sampler_id, dimension } => {
+                BindingEntry::Texture { view_id, sampler_id, dimension, .. } => {
                     // Add texture layout entry with actual dimension
                     layout_entries.push(wgt::BindGroupLayoutEntry {
                         binding: *binding,
@@ -230,11 +233,11 @@ impl BindGroupBuilder {
         
         let global = self.context.inner();
 
-        // Collect our available resources by type
+        // Collect our available resources by type, including texture_id for re-view creation
         let mut texture_entries: Vec<_> = self.entries.iter()
             .filter_map(|(binding, e)| match e {
-                BindingEntry::Texture { view_id, dimension, .. } => 
-                    Some((*binding, *view_id, *dimension)),
+                BindingEntry::Texture { view_id, dimension, texture_id, .. } => 
+                    Some((*binding, *view_id, *dimension, *texture_id)),
                 _ => None,
             })
             .collect();
@@ -246,10 +249,11 @@ impl BindGroupBuilder {
             })
             .collect();
         
+        // Collect our available uniform entries with size info
         let uniform_entries: Vec<_> = self.entries.iter()
             .filter_map(|(_, e)| match e {
-                BindingEntry::UniformBuffer { buffer_id, offset, .. } => 
-                    Some((*buffer_id, *offset)),
+                BindingEntry::UniformBuffer { buffer_id, offset, size } => 
+                    Some((*buffer_id, *offset, size.get())),
                 _ => None,
             })
             .collect();
@@ -260,14 +264,51 @@ impl BindGroupBuilder {
         let mut sampler_idx = 0;
         let mut uniform_idx = 0;
 
+        const MAX_UNIFORM_BUFFER_SIZE: u64 = 65536;
+
         for layout_entry in binding_layouts {
             match layout_entry.ty {
                 BindingLayoutType::Texture => {
                     if texture_idx < texture_entries.len() {
-                        let (_, view_id, _) = texture_entries[texture_idx];
+                        let (_, view_id, current_dimension, texture_id) = texture_entries[texture_idx];
+                        
+                        // Check if we need to create a new view with different dimension
+                        let final_view_id = if let Some(expected_dim) = layout_entry.expected_dimension {
+                            if expected_dim != current_dimension {
+                                // Create a new view with the correct dimension
+                                log::debug!("Texture dimension mismatch at binding {}: expected {:?}, got {:?}. Creating new view.",
+                                           layout_entry.binding, expected_dim, current_dimension);
+                                
+                                let view_desc = wgpu_core::resource::TextureViewDescriptor {
+                                    label: Some(Cow::Borrowed("Rebind Texture View")),
+                                    format: None,
+                                    dimension: Some(expected_dim),
+                                    usage: None,
+                                    range: wgt::ImageSubresourceRange::default(),
+                                };
+                                
+                                let (new_view_id, error) = global.texture_create_view(
+                                    texture_id,
+                                    &view_desc,
+                                    None,
+                                );
+                                
+                                if let Some(e) = error {
+                                    log::error!("Failed to create texture view with dimension {:?}: {:?}", expected_dim, e);
+                                    view_id // Fall back to original view
+                                } else {
+                                    new_view_id
+                                }
+                            } else {
+                                view_id // Dimension matches, use original view
+                            }
+                        } else {
+                            view_id // No expected dimension specified, use original view
+                        };
+                        
                         bind_entries.push(binding_model::BindGroupEntry {
                             binding: layout_entry.binding,
-                            resource: binding_model::BindingResource::TextureView(view_id),
+                            resource: binding_model::BindingResource::TextureView(final_view_id),
                         });
                         texture_idx += 1;
                         log::debug!("Bound texture to slot {}", layout_entry.binding);
@@ -288,28 +329,48 @@ impl BindGroupBuilder {
                         log::warn!("No sampler available for binding {}", layout_entry.binding);
                     }
                 }
-                BindingLayoutType::UniformBuffer => {
+                BindingLayoutType::UniformBuffer | BindingLayoutType::StorageBuffer => {
                     if uniform_idx < uniform_entries.len() {
-                        let (buffer_id, offset) = uniform_entries[uniform_idx];
-                        bind_entries.push(binding_model::BindGroupEntry {
-                            binding: layout_entry.binding,
-                            resource: binding_model::BindingResource::Buffer(
-                                binding_model::BufferBinding {
-                                    buffer: buffer_id,
-                                    offset,
-                                    // Use None to bind entire buffer - allows smaller buffers than shader declares
-                                    size: None,
-                                },
-                            ),
-                        });
+                        let (buffer_id, offset, buffer_size) = uniform_entries[uniform_idx];
+                        
+                        // Determine the actual size to bind
+                        // If we have min_binding_size from shader, use the smaller of buffer size and shader expectation
+                        // But also clamp to uniform buffer limit if it's a uniform buffer
+                        let effective_size = if layout_entry.ty == BindingLayoutType::UniformBuffer {
+                            // For uniform buffers, clamp to 64KB limit
+                            buffer_size.min(MAX_UNIFORM_BUFFER_SIZE)
+                        } else {
+                            // Storage buffers don't have this limit
+                            buffer_size
+                        };
+                        
+                        // Use explicit size instead of None to allow smaller buffers than shader declares
+                        let binding_size = NonZero::new(effective_size);
+                        
+                        if binding_size.is_some() {
+                            bind_entries.push(binding_model::BindGroupEntry {
+                                binding: layout_entry.binding,
+                                resource: binding_model::BindingResource::Buffer(
+                                    binding_model::BufferBinding {
+                                        buffer: buffer_id,
+                                        offset,
+                                        size: binding_size,
+                                    },
+                                ),
+                            });
+                            log::debug!(
+                                "Bound {} buffer to slot {} (size={})", 
+                                if layout_entry.ty == BindingLayoutType::StorageBuffer { "storage" } else { "uniform" },
+                                layout_entry.binding, 
+                                effective_size
+                            );
+                        } else {
+                            log::warn!("Buffer size is 0 for binding {}, skipping", layout_entry.binding);
+                        }
                         uniform_idx += 1;
-                        log::debug!("Bound uniform buffer to slot {}", layout_entry.binding);
                     } else {
-                        log::warn!("No uniform buffer available for binding {}", layout_entry.binding);
+                        log::warn!("No buffer available for binding {}", layout_entry.binding);
                     }
-                }
-                BindingLayoutType::StorageBuffer => {
-                    log::warn!("Storage buffers not yet implemented for binding {}", layout_entry.binding);
                 }
             }
         }

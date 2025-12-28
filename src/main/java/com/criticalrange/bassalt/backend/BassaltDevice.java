@@ -19,6 +19,7 @@ import net.fabricmc.api.Environment;
 import org.jspecify.annotations.Nullable;
 
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalDouble;
@@ -207,7 +208,7 @@ public class BassaltDevice implements GpuDevice {
 
     @Override
     public boolean isDebuggingEnabled() {
-        return false; // TODO: make configurable
+        return true; // TODO: make configurable
     }
 
     @Override
@@ -312,9 +313,9 @@ public class BassaltDevice implements GpuDevice {
      * Load a pre-converted WGSL shader from resources
      */
     private String loadPreconvertedWgsl(net.minecraft.resources.Identifier shaderId, String stage) {
-        // Convert shader ID to path: "minecraft:core/gui" -> "shaders/wgsl/core/gui.vert.wgsl" or "shaders/wgsl/core/gui.frag.wgsl"
+        // Convert shader ID to path: "minecraft:core/gui" -> "shaders/wgsl/core/gui.vert.wgsl" or "gui.frag.wgsl"
         String shaderPath = shaderId.getPath(); // Returns "core/gui"
-        String resourcePath = "shaders/wgsl/" + shaderPath + "." + stage + ".wgsl"; // Results in "shaders/wgsl/core/gui.vert.wgsl"
+        String resourcePath = "shaders/wgsl/" + shaderPath + "." + stage + ".wgsl"; // e.g., "shaders/wgsl/core/gui.vert.wgsl"
 
         try (var input = getClass().getResourceAsStream("/" + resourcePath)) {
             if (input == null) {
@@ -443,13 +444,20 @@ public class BassaltDevice implements GpuDevice {
 
     @Override
     public List<String> getEnabledExtensions() {
-        return List.of(); // TODO: query from wgpu
+        String features = getEnabledFeatures0(nativePtr);
+        if (features == null || features.isEmpty()) {
+            return List.of();
+        }
+        return Arrays.asList(features.split(", "));
     }
 
     @Override
     public int getMaxSupportedAnisotropy() {
-        return 16; // TODO: query from device
+        return getMaxSupportedAnisotropy0(nativePtr);
     }
+
+    private static native int getMaxSupportedAnisotropy0(long ptr);
+    private static native String getEnabledFeatures0(long ptr);
 
     @Override
     public void close() {

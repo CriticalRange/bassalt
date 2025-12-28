@@ -64,6 +64,13 @@ pub enum RenderCommand {
         width: u32,
         height: u32,
     },
+    PushDebugGroup {
+        label: String,
+    },
+    PopDebugGroup,
+    InsertDebugMarker {
+        label: String,
+    },
 }
 
 /// Active render pass state with command recording
@@ -266,13 +273,28 @@ impl RenderPassState {
         let max_height = self.viewport_height.saturating_sub(clamped_y);
         let clamped_width = width.min(max_width).max(1);
         let clamped_height = height.min(max_height).max(1);
-        
+
         self.commands.push(RenderCommand::SetScissorRect {
             x: clamped_x,
             y: clamped_y,
             width: clamped_width,
             height: clamped_height,
         });
+    }
+
+    /// Record a push debug group command
+    pub fn record_push_debug_group(&mut self, label: String) {
+        self.commands.push(RenderCommand::PushDebugGroup { label });
+    }
+
+    /// Record a pop debug group command
+    pub fn record_pop_debug_group(&mut self) {
+        self.commands.push(RenderCommand::PopDebugGroup);
+    }
+
+    /// Record an insert debug marker command
+    pub fn record_insert_debug_marker(&mut self, label: String) {
+        self.commands.push(RenderCommand::InsertDebugMarker { label });
     }
 
     /// End the render pass and submit to the queue
@@ -297,21 +319,27 @@ impl RenderPassState {
             }));
         }
 
-        let depth_stencil_attachment = self.depth_view.map(|view| {
-            wgpu_core::command::RenderPassDepthStencilAttachment {
-                view,
-                depth: wgpu_core::command::PassChannel {
-                    load_op: Some(wgpu_core::command::LoadOp::Clear(Some(self.clear_depth))),
-                    store_op: Some(wgpu_core::command::StoreOp::Store),
-                    read_only: false,
-                },
-                stencil: wgpu_core::command::PassChannel {
-                    load_op: Some(wgpu_core::command::LoadOp::Clear(Some(self.clear_stencil))),
-                    store_op: Some(wgpu_core::command::StoreOp::Store),
-                    read_only: false,
-                },
-            }
-        });
+        // NOTE: Depth attachment DISABLED to match pipelines (which all have depth_stencil: None)
+        // When pipelines are created without depth_stencil, render pass must also not have depth attachment
+        // Otherwise we get IncompatibleDepthStencilAttachment { expected: Some(Depth32Float), actual: None }
+        // To enable depth: re-enable depth in pipeline creation (lib.rs) and uncomment this
+        let depth_stencil_attachment: Option<wgpu_core::command::RenderPassDepthStencilAttachment> = None;
+        // Original depth attachment code for future use:
+        // let depth_stencil_attachment = self.depth_view.map(|view| {
+        //     wgpu_core::command::RenderPassDepthStencilAttachment {
+        //         view,
+        //         depth: wgpu_core::command::PassChannel {
+        //             load_op: Some(wgpu_core::command::LoadOp::Clear(Some(self.clear_depth))),
+        //             store_op: Some(wgpu_core::command::StoreOp::Store),
+        //             read_only: false,
+        //         },
+        //         stencil: wgpu_core::command::PassChannel {
+        //             load_op: Some(wgpu_core::command::LoadOp::Clear(Some(self.clear_stencil))),
+        //             store_op: Some(wgpu_core::command::StoreOp::Store),
+        //             read_only: false,
+        //         },
+        //     }
+        // });
 
         let desc = wgpu_core::command::RenderPassDescriptor {
             label: Some(Cow::Borrowed("Basalt Render Pass")),
@@ -402,6 +430,17 @@ impl RenderPassState {
                     if let Err(e) = global.render_pass_set_scissor_rect(&mut render_pass, *x, *y, *width, *height) {
                         log::error!("Failed to set scissor rect: {:?}", e);
                     }
+                }
+                RenderCommand::PushDebugGroup { label } => {
+                    // Use white color (0xFFFFFFFF) for debug groups
+                    let _ = global.render_pass_push_debug_group(&mut render_pass, label, 0xFFFFFFFF);
+                }
+                RenderCommand::PopDebugGroup => {
+                    let _ = global.render_pass_pop_debug_group(&mut render_pass);
+                }
+                RenderCommand::InsertDebugMarker { label } => {
+                    // Use white color (0xFFFFFFFF) for debug markers
+                    let _ = global.render_pass_insert_debug_marker(&mut render_pass, label, 0xFFFFFFFF);
                 }
             }
         }

@@ -1,26 +1,40 @@
-// Text background see-through fragment shader
-// Converted from rendertype_text_background_see_through.fsh
-
-struct FragmentInput {
-    @location(0) vertex_color: vec4<f32>,
-}
-
 struct DynamicTransforms {
     ModelViewMat: mat4x4<f32>,
     ColorModulator: vec4<f32>,
     ModelOffset: vec3<f32>,
-    _padding: f32,
     TextureMat: mat4x4<f32>,
 }
 
-@group(0) @binding(0)
-var<uniform> dynamic_transforms: DynamicTransforms;
+struct FragmentOutput {
+    @location(0) fragColor: vec4<f32>,
+}
 
-@fragment
-fn main_fs(in: FragmentInput) -> @location(0) vec4<f32> {
-    let color = in.vertex_color;
-    if (color.a < 0.1) {
-        discard;
+@group(0) @binding(0) 
+var<uniform> global: DynamicTransforms;
+var<private> vertexColor_1: vec4<f32>;
+var<private> fragColor: vec4<f32>;
+
+fn main_1() {
+    var color: vec4<f32>;
+
+    let _e10 = vertexColor_1;
+    color = _e10;
+    let _e12 = color;
+    if (_e12.w < 0.1f) {
+        {
+            discard;
+        }
     }
-    return color * dynamic_transforms.ColorModulator;
+    let _e16 = color;
+    let _e17 = global.ColorModulator;
+    fragColor = (_e16 * _e17);
+    return;
+}
+
+@fragment 
+fn main(@location(0) vertexColor: vec4<f32>) -> FragmentOutput {
+    vertexColor_1 = vertexColor;
+    main_1();
+    let _e15 = fragColor;
+    return FragmentOutput(_e15);
 }

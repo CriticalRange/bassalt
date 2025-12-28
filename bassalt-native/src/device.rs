@@ -701,6 +701,16 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         &self.limits
     }
 
+    /// Get the device context
+    pub fn get_context(&self) -> &Arc<BasaltContext> {
+        &self.context
+    }
+
+    /// Get the device ID
+    pub fn get_device_id(&self) -> id::DeviceId {
+        self.device_id
+    }
+
     /// Create a buffer
     pub fn create_buffer(&self, size: u64, usage: u32) -> Result<id::BufferId> {
         let mut wgpu_usage = self.map_buffer_usage(usage);

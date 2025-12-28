@@ -1,23 +1,20 @@
-// Animate sprite interpolate fragment shader
-// Converted from animate_sprite_interpolate.fsh
+// Stub fragment shader - GLSL conversion failed
 
 struct FragmentInput {
-    @location(0) animation_progress: f32,
-    @location(1) tex_coord0: vec2<f32>,
+    @location(0) vertex_color: vec4<f32>,
 }
 
-@group(0) @binding(1)
-var current_sprite_texture: texture_2d<f32>;
+struct DynamicTransforms {
+    ModelViewMat: mat4x4<f32>,
+    ColorModulator: vec4<f32>,
+    ModelOffset: vec3<f32>,
+    TextureMat: mat4x4<f32>,
+}
 
-@group(0) @binding(2)
-var next_sprite_texture: texture_2d<f32>;
-
-@group(0) @binding(3)
-var sprite_sampler: sampler;
+@group(0) @binding(0)
+var<uniform> dynamic_transforms: DynamicTransforms;
 
 @fragment
-fn main_fs(in: FragmentInput) -> @location(0) vec4<f32> {
-    let current_color = textureSample(current_sprite_texture, sprite_sampler, in.tex_coord0);
-    let next_color = textureSample(next_sprite_texture, sprite_sampler, in.tex_coord0);
-    return mix(current_color, next_color, in.animation_progress);
+fn main(in: FragmentInput) -> @location(0) vec4<f32> {
+    return in.vertex_color * dynamic_transforms.ColorModulator;
 }

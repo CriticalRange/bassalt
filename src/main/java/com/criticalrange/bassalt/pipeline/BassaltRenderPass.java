@@ -52,6 +52,11 @@ public class BassaltRenderPass implements RenderPass {
     private static native void setBindGroup0(long devicePtr, long renderPassPtr,
             int index, long bindGroupPtr);
 
+    // Native methods for debug groups and markers
+    private static native void pushDebugGroup(long renderPassPtr, String label);
+    private static native void popDebugGroup(long renderPassPtr);
+    private static native void insertDebugMarker(long renderPassPtr, String label);
+
     BassaltRenderPass(BassaltDevice device, long nativePassPtr) {
         this.device = device;
         this.nativePassPtr = nativePassPtr;
@@ -59,12 +64,14 @@ public class BassaltRenderPass implements RenderPass {
 
     @Override
     public void pushDebugGroup(Supplier<String> label) {
-        // TODO: implement debug group support using wgpu's push_debug_group
+        checkClosed();
+        pushDebugGroup(nativePassPtr, label.get());
     }
 
     @Override
     public void popDebugGroup() {
-        // TODO: implement debug group support using wgpu's pop_debug_group
+        checkClosed();
+        popDebugGroup(nativePassPtr);
     }
 
     @Override
@@ -110,6 +117,7 @@ public class BassaltRenderPass implements RenderPass {
 
         if (value instanceof BassaltBuffer) {
             long bufferPtr = ((BassaltBuffer) value).getNativePtr();
+            System.out.println("[Bassalt] setUniform: name=" + name + ", size=" + value.size());
             uniformBindings.put(name, new UniformBinding(bufferPtr, 0, value.size()));
         }
     }

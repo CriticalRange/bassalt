@@ -22,6 +22,8 @@ pub struct BufferInfo {
 pub struct TextureViewInfo {
     pub id: id::TextureViewId,
     pub dimension: wgpu_types::TextureViewDimension,
+    /// The underlying texture that this view was created from
+    pub texture_id: id::TextureId,
 }
 
 /// Texture info stored alongside ID
@@ -42,10 +44,39 @@ pub enum BindingLayoutType {
 }
 
 /// Binding layout entry for a specific slot
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct BindingLayoutEntry {
     pub binding: u32,
     pub ty: BindingLayoutType,
+    /// Minimum binding size expected by the shader (for buffer bindings)
+    /// None means size is determined at bind time
+    pub min_binding_size: Option<u64>,
+    /// Expected texture dimension (for texture bindings)
+    /// The texture view must match this dimension
+    pub expected_dimension: Option<wgpu_types::TextureViewDimension>,
+    /// Variable name in the shader (for uniform buffers)
+    /// Used to map Minecraft's named uniforms to binding slots
+    /// Example: "dynamic_transforms" for DynamicTransforms uniform
+    pub variable_name: Option<String>,
+}
+
+/// Depth format expectation for a pipeline
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipelineDepthFormat {
+    /// Pipeline has no depth state (depth attachment must be None)
+    None,
+    /// Pipeline expects Depth32Float
+    Depth32Float,
+    /// Pipeline expects Depth24Plus
+    Depth24Plus,
+    /// Pipeline expects Depth24PlusStencil8
+    Depth24PlusStencil8,
+}
+
+impl Default for PipelineDepthFormat {
+    fn default() -> Self {
+        PipelineDepthFormat::None
+    }
 }
 
 /// Render pipeline info stored alongside ID
@@ -54,6 +85,8 @@ pub struct RenderPipelineInfo {
     pub id: id::RenderPipelineId,
     pub bind_group_layout_id: id::BindGroupLayoutId,
     pub binding_layouts: Vec<BindingLayoutEntry>, // What type each binding expects
+    /// What depth format this pipeline expects (None = no depth, Some = specific format)
+    pub depth_format: PipelineDepthFormat,
 }
 
 
@@ -139,9 +172,10 @@ impl ResourceHandleStore {
         &self,
         view_id: id::TextureViewId,
         dimension: wgpu_types::TextureViewDimension,
+        texture_id: id::TextureId,
     ) -> u64 {
         let handle = self.next();
-        let info = TextureViewInfo { id: view_id, dimension };
+        let info = TextureViewInfo { id: view_id, dimension, texture_id };
         self.texture_views.write().insert(handle, info);
         handle
     }
@@ -209,12 +243,14 @@ impl ResourceHandleStore {
         pipeline_id: id::RenderPipelineId,
         bind_group_layout_id: id::BindGroupLayoutId,
         binding_layouts: Vec<BindingLayoutEntry>,
+        depth_format: PipelineDepthFormat,
     ) -> u64 {
         let handle = self.next();
         let info = RenderPipelineInfo {
             id: pipeline_id,
             bind_group_layout_id,
             binding_layouts,
+            depth_format,
         };
         self.render_pipelines.write().insert(handle, info);
         handle

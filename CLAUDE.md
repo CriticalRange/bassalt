@@ -1,22 +1,5 @@
 # CLAUDE.md
 
-Summary
-We've made major progress implementing the stub features:
-
-✅ Successfully Fixed:
-Pipeline-BindGroup Layout Matching - Bind groups now use the pipeline's expected layout
-Binding Type Matching - Textures, samplers, and uniforms are now bound to correct slots based on shader reflection
-macOS Threading - Surface creation works properly on main thread
-⚠️ Remaining Issues (Non-Fatal):
-Buffer Size Mismatches - Some Minecraft uniform buffers don't match shader expectations
-Depth Stencil Attachment Mismatches - Some pipelines expect different depth formats
-Buffer Too Large - Some buffers exceed uniform binding limits
-These issues cause some draw calls to fail, but the game continues running. They're deeper architectural issues that require:
-
-Proper buffer memory management
-Dynamic uniform buffers with slicing
-Per-pipeline depth stencil configuration
-
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
@@ -26,6 +9,13 @@ Bassalt Renderer is a Minecraft Fabric mod targeting Minecraft version 26.1-snap
 **Key Architecture Decision**: This mod uses Rust + wgpu-core directly (not wgpu-native's C API) for memory safety and cleaner JNI integration. The native library is compiled as a cdylib and loaded via JNI.
 
 **Important**: The package name is `com.criticalrange.bassalt` (note: bassalt, not basalt).
+
+## Requirements
+
+- **Java 25** (required for compilation and runtime)
+- **Rust** (latest stable, for building native library)
+- **Cargo** (comes with Rust)
+- **Minecraft 26.1-snapshot-1** (Fabric)
 
 ## Build Commands
 
@@ -39,14 +29,28 @@ cd bassalt-native && cargo build --release
 # Build debug version of native library
 cd bassalt-native && cargo build
 
+# Build shader converter tool only
+cd bassalt-native && cargo build --release --bin shader_converter
+
 # Clean all build artifacts
 ./gradlew clean
 
 # Run the mod with Bassalt enabled
 ./gradlew runClient -Dbassalt.enabled=true
+
+# Run with mixin debugging (exports transformed classes to run/.mixin.out/)
+./gradlew runClient -Dbassalt.enabled=true -Dmixin.debug.export=true
 ```
 
-**Important**: The build process automatically compiles the Rust native library via cargo before packaging the JAR. The native library (.so/.dll/.dylib) is included in the JAR under `META-INF/native/`.
+**Build Process Flow**:
+1. `buildShaderConverter` - Builds the shader_converter Rust binary
+2. `convertShaders` - Converts GLSL shaders from `src/main/resources/shaders/` to WGSL in `src/main/resources/shaders/wgsl/`
+3. `buildNative` - Compiles the Rust native library (bassalt-native)
+4. `copyNativeLibrary` - Copies the built library to `src/main/resources/native/` and `META-INF/native/`
+5. `processResources` - Processes resources including converted shaders
+6. `jar` / `build` - Packages everything into the final JAR
+
+**Important**: The native library (.so/.dll/.dylib) is automatically built via cargo and included in the JAR under `META-INF/native/`. The build will fail if cargo is not available or if the Rust code doesn't compile.
 
 ## Architecture Overview
 
@@ -210,10 +214,17 @@ Minecraft uses pre-converted WGSL shaders stored in resource packs:
 
 **Shader Naming**: `<shader_name>_<type>.wgsl` (e.g., `position_tex_color_vs.wgsl`, `position_tex_color_fs.wgsl`)
 
-**Shader Converter**: `bassalt-native/src/bin/shader_converter.rs` converts GLSL to WGSL:
+**Shader Converter**: The Gradle build automatically runs `bassalt-native/src/bin/shader_converter.rs` to convert all GLSL shaders to WGSL. Manual conversion:
 ```bash
-cargo run --bin shader_converter -- <input_glsl> <output_wgsl> --type vertex|fragment
+cd bassalt-native
+cargo run --bin shader_converter -- ../src/main/resources/shaders ../src/main/resources/shaders/wgsl
 ```
+
+The shader converter:
+- Scans `src/main/resources/shaders/core/` and `src/main/resources/shaders/post/` for `.fsh`/`.vsh` files
+- Preprocesses GLSL (removes `#version`, `#moj_import`, precision qualifiers)
+- Converts to WGSL using naga
+- Outputs to `src/main/resources/shaders/wgsl/core/` and `src/main/resources/shaders/wgsl/post/`
 
 **Shader Reflection**: When creating render pipelines, naga parses the WGSL to extract:
 - Binding layout (which slot expects texture/sampler/uniform)
@@ -350,15 +361,21 @@ pub extern "system" fn Java_com_criticalrange_bassalt_<ClassName>_<MethodName>(
 ### Adding New Mixins
 
 1. Create mixin class in `com.criticalrange.bassalt.mixin`
-2. Update `src/main/resources/bassaltrenderer.mixins.json`:
+2. Update `src/main/resources/basaltrenderer.mixins.json` (note: "basalt", not "bassalt"):
 ```json
 {
-  "mixins": [
-    "ExistingMixin",
-    "NewMixin"
+  "required": true,
+  "package": "com.criticalrange.bassalt.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "mixins": [],
+  "client": [
+    "BackendSwapMixin",
+    "YourNewMixin"
   ]
 }
 ```
+
+**Note**: The mixin file name is `basaltrenderer.mixins.json` (with one 's'), while the package uses `bassalt` (with double 's'). This is intentional and matches the mod ID `bassaltrenderer`.
 
 ### Debugging Native Code
 
@@ -376,6 +393,14 @@ cd bassalt-native && cargo build
 gdb --args java ... -Dbassalt.enabled=true
 ```
 
+### Common Build Issues
+
+1. **Shader converter not found**: Run `cd bassalt-native && cargo build --release --bin shader_converter` first
+2. **Native library not found at runtime**: Check that `META-INF/native/libbassalt_native.so` (or .dll/.dylib) is in the JAR
+3. **macOS deployment target**: The build sets `MACOSX_DEPLOYMENT_TARGET=10.15` - if building for older macOS, modify build.gradle
+4. **Gradle daemon memory**: Default is 1GB (see gradle.properties `org.gradle.jvmargs=-Xmx1G`) - increase if builds fail with OOM
+5. **JNI signature mismatch**: Ensure JNI function names exactly match the full package path with underscores
+
 ## Version Management
 
 Mod versions and dependencies are managed in `gradle.properties`:
@@ -390,7 +415,31 @@ Rust dependencies are in `bassalt-native/Cargo.toml`:
 - `wgpu-hal = "27.0"` - Hardware abstraction layer
 - `naga = "27.0"` - Shader translation
 - `jni = "0.21"` - JNI bindings (note: 0.21, not 0.22)
-- `objc2 = "0.5"` - macOS Objective-C interop
+- `objc2 = "0.5"` - macOS Objective-C interop (macOS only)
+- `dispatch = "0.2"` - macOS Grand Central Dispatch (macOS only)
+
+**Rust Feature Flags** (in Cargo.toml):
+```toml
+default = ["metal", "vulkan", "glsl", "wgsl"]
+
+# Backend features
+vulkan = ["wgpu-core/vulkan"]  # Linux/Windows
+metal = ["wgpu-core/metal"]    # macOS/iOS
+dx12 = ["wgpu-core/dx12"]      # Windows
+gles = ["wgpu-core/gles"]      # OpenGL ES fallback
+
+# Shader language features
+spirv = ["naga/spv-in", "wgpu-core/spirv"]
+glsl = ["naga/glsl-in", "wgpu-core/glsl"]
+wgsl = ["wgpu-core/wgsl"]
+```
+
+To build with different backends:
+```bash
+cd bassalt-native
+cargo build --release --no-default-features --features "vulkan,glsl,wgsl"  # Vulkan only
+cargo build --release --no-default-features --features "dx12,glsl,wgsl"   # DirectX 12 only
+```
 
 ## Current Implementation Status
 
@@ -404,50 +453,112 @@ Rust dependencies are in `bassalt-native/Cargo.toml`:
 - **Bind Group System**: Type-aware binding matches shader expectations
 - **Render Pass Recording**: Commands recorded and submitted
 - **Frame Presentation**: Swapchain acquire/present cycle
+- **Per-Pipeline Depth Format Tracking**: `RenderPipelineInfo` tracks expected depth format
+- **Buffer Size Clamping**: Uniform buffers clamped to 64KB limit
+- **Storage Buffer Fallback**: Large buffers (>64KB) use storage buffers
+- **Shader Depth Detection**: `shader_writes_depth()` function analyzes naga module for FragDepth output
 
 ### ⚠️ Known Issues (Non-Fatal)
-1. **Buffer Size Mismatch**: Some shaders expect larger uniform buffers than Minecraft provides
+1. **Depth Testing Disabled**: All pipelines created without depth_stencil state
+   - Reason: Render pass may/may not have depth attachment
+   - Impact: No depth culling (Z-buffer not used)
+   - Fix: Implement proper depth texture management in render pass creation
+   
+2. **Buffer Size Mismatch** (Causes Yellow Screen): Some shaders expect larger uniform buffers than Minecraft provides
    - Error: `BindingSizeTooSmall(shader_size: 160, bound_size: 56)`
    - Cause: WGSL uniform struct is larger than Minecraft's actual data
-   - Workaround: Non-fatal, draw call skipped
+   - Impact: Draw calls fail → main framebuffer shows uninitialized memory (yellow)
+   - Fix: Reduce shader uniform sizes to match Minecraft's buffers, or pad buffers
    
-2. **Buffer Range Too Large**: Some vertex/instance buffers exceed uniform limits
-   - Error: `BufferRangeTooLarge { given: 147712, limit: 65536 }`
-   - Cause: Large buffers bound to uniform slots
-   - Fix needed: Dynamic uniform buffer management
-   
-3. **Depth Stencil Mismatch**: Some pipelines expect different depth formats
-   - Error: `IncompatibleDepthStencilAttachment { expected: None, actual: Some(Depth32Float) }`
-   - Cause: Pipeline created without depth state, but render pass has depth attachment
-   - Fix needed: Per-pipeline depth stencil configuration
-   
-4. **No Main Framebuffer Detection**: Present() sometimes has nothing to show
+3. **No Main Framebuffer Detection**: Present() sometimes has nothing to show
    - Warning: `No main framebuffer detected - nothing to present`
    - Cause: Render pass targeting non-swapchain texture
    - Fix needed: Better main render target tracking
 
+### ✅ Recently Fixed
+1. **Depth Stencil Mismatch**: FIXED by disabling depth in both pipelines AND render passes
+   - Root cause: Pipeline with `depth_stencil: None` + render pass with depth attachment = mismatch error
+   - Solution: Both `depth_stencil` in `lib.rs` AND `depth_stencil_attachment` in `render_pass.rs` set to None
+   - `shader_writes_depth()` function added for future depth detection via naga
+
+2. **Texture Dimension Mismatch**: FIXED by creating new views with expected dimension
+   - Root cause: Shader expects Cube texture but provided D2Array (6 layer cubemap)
+   - Solution: `expected_dimension` added to `BindingLayoutEntry`, `build_with_layout` creates new view if mismatch
+   - Also added `texture_id` to `TextureViewInfo` for re-view creation
+
+3. **Buffer Range Too Large**: Large buffers now use storage buffer binding type
+   - Buffers >64KB are bound as read-only storage buffers instead of uniform buffers
+
+3. **Animation Sprite Shaders**: Fixed MipMapLevel support
+   - `animate_sprite_blit.frag.wgsl` and `animate_sprite_interpolate.frag.wgsl` now use `textureSampleLevel` with proper mipmap level
+
+4. **Post-Processing Shaders**: All post-processing effects now implemented
+   - Implemented: blit, invert, bits, transparency, color_convolve, entity_sobel, rotscale, spiderclip
+   - Complete depth-based transparency compositing
+   - Spider vision effects with rotation/scaling
+   - Color manipulation and edge detection
+
 ### 🔲 Not Yet Implemented
+- Depth testing (requires proper depth texture management)
 - Compute shaders
 - Multisampling (MSAA)
 - Dynamic uniform buffer slicing
 - Pipeline caching
 - Ray tracing
+- RGSS (Rotated Grid Super-Sampling) for terrain shader (currently simplified)
+
+## Shader Implementation Status
+
+### Core Shaders (✅ Complete)
+All core rendering shaders have been implemented:
+- Position-based: `position`, `position_color`, `position_tex`, `position_tex_color`
+- Entity rendering: `entity`, `block`, `particle`, `gui`, `glint`
+- World rendering: `terrain`, `sky`, `stars`, `rendertype_clouds`
+- Special effects: `rendertype_end_portal`, `rendertype_beacon_beam`, `rendertype_lightning`
+- Text rendering: `rendertype_text*`, `rendertype_text_intensity*`, `rendertype_text_background*`
+- Transparency: `rendertype_entity_alpha`, `rendertype_translucent_moving_block`
+- Utility: `rendertype_lines`, `rendertype_outline`, `rendertype_leash`, `rendertype_water_mask`
+- Animation: `animate_sprite`, `animate_sprite_blit`, `animate_sprite_interpolate`
+
+### Post-Processing Shaders (✅ Complete)
+All post-processing effects implemented:
+- `box_blur` - Gaussian blur for menus and effects
+- `entity_outline_box_blur` - Entity outline rendering
+- `blit` - Simple texture copy with color modulation
+- `invert` - Color inversion effect
+- `bits` - Pixelization and bit-depth reduction
+- `transparency` - Multi-layer depth-based compositing
+- `color_convolve` - Color matrix transformation
+- `entity_sobel` - Edge detection using Sobel filter
+- `rotscale` / `spiderclip` - Spider vision effects with rotation/scaling/vignette
+
+### Known Shader Limitations
+1. **Terrain RGSS**: The terrain shader uses simplified nearest-neighbor sampling instead of full RGSS (Rotated Grid Super-Sampling)
+   - Original uses complex multi-sample anti-aliasing with derivative-based mip selection
+   - Current implementation provides basic functionality without RGSS overhead
+2. **Compute Shaders**: Not yet implemented in native layer
+3. **Multisampling**: Basic MSAA support only
 
 ## Known Limitations
 
-1. **Shader Coverage**: Pre-converted WGSL shaders must be provided for each Minecraft shader
-2. **Compute Shaders**: Not yet implemented in native layer
-3. **Multisampling**: Basic MSAA support only
-4. **Bindless Resources**: Uses bind groups (not bindless textures)
-5. **Uniform Buffer Size**: Minecraft uniform buffers may not match shader expectations
+1. **Bindless Resources**: Uses bind groups (not bindless textures)
+2. **Uniform Buffer Size**: Minecraft uniform buffers may not match shader expectations
 
-## Important Notes
+## Important Notes and Naming Conventions
 
+### Critical Naming Gotchas
+- **Mod ID vs Package**: Mod ID is `bassaltrenderer` (in fabric.mod.json), package is `com.criticalrange.bassalt`
+- **Mixin file**: `basaltrenderer.mixins.json` (one 's' in basalt) vs package `com.criticalrange.bassalt` (double 's')
+- **Main class**: Entry point is `com.criticalrange.Bassaltrenderer` (capital B, note the package mismatch)
+- **Native library**: The Rust library is named `libbassalt_native` (not bassaltrenderer)
+
+### Technical Details
 - **Package naming**: The Java package is `com.criticalrange.bassalt` but the native library is named `libbassalt_native`
 - **Resource ID pattern**: wgpu-core uses resource IDs (like `BufferId`, `TextureId`) which are converted to/from `jlong` handles
 - **Arc usage**: The global context uses `Arc` for reference counting; when extracting from raw pointers, remember to re-clone or forget as appropriate
 - **GLSL preprocessing**: Minecraft's shader format requires preprocessing (removing `#version`, `#moj_import`, precision qualifiers) before naga translation
 - **Binding slots**: Always check shader reflection to determine correct binding slot types - don't assume order
+- **Buffer binding sizes**: Use explicit sizes (not `size: None`) to allow binding smaller buffers than shader declares
 
 ## Future Enhancements
 
@@ -456,4 +567,4 @@ Rust dependencies are in `bassalt-native/Cargo.toml`:
 - Async compute pipelines
 - Pipeline caching for faster startup
 - Dynamic uniform buffer management for proper sizing
-- Per-pipeline depth stencil configuration
+

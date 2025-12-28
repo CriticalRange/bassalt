@@ -1,5 +1,4 @@
-// Debug point vertex shader
-// Converted from debug_point.vsh
+// Stub vertex shader - GLSL conversion failed
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -15,7 +14,6 @@ struct DynamicTransforms {
     ModelViewMat: mat4x4<f32>,
     ColorModulator: vec4<f32>,
     ModelOffset: vec3<f32>,
-    _padding: f32,
     TextureMat: mat4x4<f32>,
 }
 
@@ -30,7 +28,7 @@ var<uniform> dynamic_transforms: DynamicTransforms;
 var<uniform> projection: Projection;
 
 @vertex
-fn main_vs(in: VertexInput) -> VertexOutput {
+fn main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.position = projection.ProjMat * dynamic_transforms.ModelViewMat * vec4<f32>(in.position, 1.0);
     out.vertex_color = in.color;

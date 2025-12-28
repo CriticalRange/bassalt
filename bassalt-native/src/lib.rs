@@ -279,6 +279,68 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_getM
     device.get_limits().max_texture_dimension_2d as jint
 }
 
+/// Get max supported anisotropy
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_getMaxSupportedAnisotropy0(
+    _env: JNIEnv,
+    _class: JClass,
+    device_ptr: jlong,
+) -> jint {
+    if device_ptr == 0 {
+        return 1;
+    }
+
+    // wgpu doesn't expose max anisotropy in device limits
+    // Most modern GPUs support 16x anisotropy
+    // This is a safe default value
+    16
+}
+
+/// Get enabled extensions/features as a comma-separated string
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_getEnabledFeatures0(
+    mut env: JNIEnv,
+    _class: JClass,
+    device_ptr: jlong,
+) -> jstring {
+    if device_ptr == 0 {
+        return std::ptr::null_mut();
+    }
+
+    let device = unsafe { &*(device_ptr as *const BasaltDevice) };
+
+    // Query device features from wgpu-core
+    let features = device.get_context().inner().device_features(device.get_device_id());
+
+    // Convert features to a comma-separated string
+    let mut feature_list = Vec::new();
+    if features.contains(wgt::Features::DEPTH_CLIP_CONTROL) {
+        feature_list.push("DEPTH_CLIP_CONTROL");
+    }
+    if features.contains(wgt::Features::TEXTURE_COMPRESSION_BC) {
+        feature_list.push("TEXTURE_COMPRESSION_BC");
+    }
+    if features.contains(wgt::Features::TEXTURE_COMPRESSION_ETC2) {
+        feature_list.push("TEXTURE_COMPRESSION_ETC2");
+    }
+    if features.contains(wgt::Features::TEXTURE_COMPRESSION_ASTC) {
+        feature_list.push("TEXTURE_COMPRESSION_ASTC");
+    }
+    if features.contains(wgt::Features::TIMESTAMP_QUERY) {
+        feature_list.push("TIMESTAMP_QUERY");
+    }
+    if features.contains(wgt::Features::PIPELINE_STATISTICS_QUERY) {
+        feature_list.push("PIPELINE_STATISTICS_QUERY");
+    }
+
+    let features_str = feature_list.join(", ");
+
+    match env.new_string(&features_str) {
+        Ok(s) => s.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
 /// Get uniform offset alignment
 #[no_mangle]
 pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_getUniformOffsetAlignment(
@@ -596,7 +658,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
 
     match device.create_texture_view(texture_info.id, texture_info.array_layers) {
         Ok((view_id, dimension)) => {
-            let handle = HANDLES.insert_texture_view(view_id, dimension);
+            let handle = HANDLES.insert_texture_view(view_id, dimension, texture_info.id);
             log::debug!("Created texture view with handle {} (dimension={:?}, layers={}) for texture {}", 
                        handle, dimension, texture_info.array_layers, texture_handle);
             handle as jlong
@@ -880,6 +942,40 @@ fn create_vertex_buffer_layout(format_index: usize) -> Cow<'static, [wgpu_core::
     }
 }
 
+/// Detect if a fragment shader writes to the depth buffer by checking for FragDepth output.
+/// This is used to determine if a pipeline needs depth_stencil state.
+fn shader_writes_depth(fragment_module: &naga::Module) -> bool {
+    for entry_point in &fragment_module.entry_points {
+        if entry_point.stage != naga::ShaderStage::Fragment {
+            continue;
+        }
+        
+        // Check if the entry point has early_depth_test set
+        if entry_point.early_depth_test.is_some() {
+            return true;
+        }
+        
+        // Check function result for FragDepth builtin
+        if let Some(ref result) = entry_point.function.result {
+            // Direct binding check
+            if let Some(naga::Binding::BuiltIn(naga::BuiltIn::FragDepth)) = &result.binding {
+                return true;
+            }
+            
+            // Check if result is a struct with FragDepth member
+            let ty = &fragment_module.types[result.ty];
+            if let naga::TypeInner::Struct { members, .. } = &ty.inner {
+                for member in members {
+                    if let Some(naga::Binding::BuiltIn(naga::BuiltIn::FragDepth)) = &member.binding {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Helper function to create a bind group layout from shader reflection
 /// Returns (BindGroupLayoutId, PipelineLayoutId, binding_layouts)
 fn create_layout_from_shaders(
@@ -890,28 +986,67 @@ fn create_layout_from_shaders(
 ) -> Result<(wgpu_core::id::BindGroupLayoutId, wgpu_core::id::PipelineLayoutId, Vec<resource_handles::BindingLayoutEntry>), BasaltError> {
     use std::collections::BTreeMap;
     use std::borrow::Cow;
+    use std::num::NonZeroU64;
     use wgpu_core::binding_model;
     use resource_handles::{BindingLayoutEntry, BindingLayoutType};
+    use naga::proc::{Layouter, GlobalCtx};
+
+    // Create layouters for both modules to calculate type sizes
+    let mut vertex_layouter = Layouter::default();
+    let mut fragment_layouter = Layouter::default();
+
+    // Update layouters with module types
+    let vertex_gctx = GlobalCtx {
+        types: &vertex_module.types,
+        constants: &vertex_module.constants,
+        overrides: &vertex_module.overrides,
+        global_expressions: &vertex_module.global_expressions,
+    };
+    let fragment_gctx = GlobalCtx {
+        types: &fragment_module.types,
+        constants: &fragment_module.constants,
+        overrides: &fragment_module.overrides,
+        global_expressions: &fragment_module.global_expressions,
+    };
+
+    if let Err(e) = vertex_layouter.update(vertex_gctx) {
+        log::warn!("Failed to calculate vertex shader layouts: {:?}", e);
+    }
+    if let Err(e) = fragment_layouter.update(fragment_gctx) {
+        log::warn!("Failed to calculate fragment shader layouts: {:?}", e);
+    }
 
     // Collect all bindings from both shaders
-    // Store both the wgpu entry and our layout type
-    let mut bindings: BTreeMap<u32, (wgt::BindGroupLayoutEntry, BindingLayoutType)> = BTreeMap::new();
+    // Store: wgpu entry, our layout type, min_binding_size, and variable name
+    let mut bindings: BTreeMap<u32, (wgt::BindGroupLayoutEntry, BindingLayoutType, Option<u64>, Option<String>)> = BTreeMap::new();
 
     // Helper to extract bindings from a module
-    let mut extract_bindings = |module: &naga::Module, _stage: wgt::ShaderStages| {
+    let mut extract_bindings = |module: &naga::Module, layouter: &Layouter, _stage: wgt::ShaderStages| {
         for (_handle, global_var) in module.global_variables.iter() {
             if let Some(binding) = &global_var.binding {
                 // Only process group 0 bindings (Minecraft uses group 0)
                 if binding.group == 0 {
                     let ty = &module.types[global_var.ty];
 
-                    let (binding_type, layout_type) = match global_var.space {
+                    // Get the variable name from the shader
+                    let var_name = global_var.name.clone();
+
+                    let (binding_type, layout_type, min_size) = match global_var.space {
                         naga::AddressSpace::Uniform => {
+                            // Calculate the actual size of the uniform buffer struct
+                            let type_layout = layouter[global_var.ty];
+                            let struct_size = type_layout.to_stride() as u64; // Use stride for proper alignment
+
+                            log::debug!("Uniform buffer at binding {}: size = {} bytes, alignment = {}",
+                                       binding.binding, struct_size, type_layout.alignment);
+
+                            let min_binding_size = NonZeroU64::new(struct_size);
+
                             (wgt::BindingType::Buffer {
                                 ty: wgt::BufferBindingType::Uniform,
                                 has_dynamic_offset: false,
-                                min_binding_size: None,
-                            }, BindingLayoutType::UniformBuffer)
+                                min_binding_size,
+                            }, BindingLayoutType::UniformBuffer, Some(struct_size))
                         }
                         naga::AddressSpace::Handle => {
                             // Check if it's a texture or sampler
@@ -932,11 +1067,11 @@ fn create_layout_from_shaders(
                                         sample_type: wgt::TextureSampleType::Float { filterable: true },
                                         view_dimension,
                                         multisampled: false,
-                                    }, BindingLayoutType::Texture)
+                                    }, BindingLayoutType::Texture, None)
                                 }
                                 naga::TypeInner::Sampler { .. } => {
                                     (wgt::BindingType::Sampler(wgt::SamplerBindingType::Filtering),
-                                     BindingLayoutType::Sampler)
+                                     BindingLayoutType::Sampler, None)
                                 }
                                 _ => continue, // Skip unsupported types
                             }
@@ -949,26 +1084,56 @@ fn create_layout_from_shaders(
                     let visibility = wgt::ShaderStages::VERTEX | wgt::ShaderStages::FRAGMENT;
 
                     bindings.entry(binding.binding)
-                        .and_modify(|(e, _)| e.visibility |= visibility)
+                        .and_modify(|(e, _, min_sz, name)| {
+                            e.visibility |= visibility;
+                            // Keep the larger min_binding_size if both shaders define it
+                            if let Some(new_size) = min_size {
+                                *min_sz = Some(min_sz.map_or(new_size, |old| old.max(new_size)));
+                            }
+                            // Prefer non-None variable name
+                            if name.is_none() && var_name.is_some() {
+                                *name = var_name.clone();
+                            }
+                        })
                         .or_insert((wgt::BindGroupLayoutEntry {
                             binding: binding.binding,
                             visibility,
                             ty: binding_type,
                             count: None,
-                        }, layout_type));
+                        }, layout_type, min_size, var_name.clone()));
                 }
             }
         }
     };
 
     // Extract bindings from both shaders
-    extract_bindings(vertex_module, wgt::ShaderStages::VERTEX);
-    extract_bindings(fragment_module, wgt::ShaderStages::FRAGMENT);
+    extract_bindings(vertex_module, &vertex_layouter, wgt::ShaderStages::VERTEX);
+    extract_bindings(fragment_module, &fragment_layouter, wgt::ShaderStages::FRAGMENT);
 
     // Create bind group layout entries vector (sorted by binding number)
-    let layout_entries: Vec<wgt::BindGroupLayoutEntry> = bindings.values().map(|(e, _)| e.clone()).collect();
+    let layout_entries: Vec<wgt::BindGroupLayoutEntry> = bindings.values().map(|(e, _, _, _)| e.clone()).collect();
     let binding_layouts: Vec<BindingLayoutEntry> = bindings.iter()
-        .map(|(binding, (_, ty))| BindingLayoutEntry { binding: *binding, ty: *ty })
+        .map(|(binding, (entry, ty, min_size, var_name))| {
+            // Extract expected dimension for texture bindings
+            let expected_dimension = if let wgt::BindingType::Texture { view_dimension, .. } = entry.ty {
+                Some(view_dimension)
+            } else {
+                None
+            };
+
+            log::debug!("Binding {} ({}): type={:?}, var_name={:?}",
+                       binding,
+                       var_name.as_ref().map(|s| s.as_str()).unwrap_or("?"),
+                       ty, var_name);
+
+            BindingLayoutEntry {
+                binding: *binding,
+                ty: *ty,
+                min_binding_size: *min_size,
+                expected_dimension,
+                variable_name: var_name.clone(),
+            }
+        })
         .collect();
 
     log::debug!("Creating pipeline layout with {} bindings: {:?}", binding_layouts.len(), binding_layouts);
@@ -1069,6 +1234,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
     };
 
     // Parse WGSL shaders
+    println!("[Bassalt] Parsing WGSL shaders...");
     let vertex_module = match front::wgsl::parse_str(&vertex_wgsl) {
         Ok(module) => module,
         Err(e) => {
@@ -1078,6 +1244,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
             return 0;
         }
     };
+    println!("[Bassalt] Vertex WGSL parsed successfully");
 
     let fragment_module = match front::wgsl::parse_str(&fragment_wgsl) {
         Ok(module) => module,
@@ -1088,8 +1255,10 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
             return 0;
         }
     };
+    println!("[Bassalt] Fragment WGSL parsed successfully");
 
     // Create pipeline layout from shader reflection
+    println!("[Bassalt] Creating pipeline layout from shader reflection...");
     let (bind_group_layout_id, pipeline_layout_id, binding_layouts) = match create_layout_from_shaders(
         device_context,
         device_id,
@@ -1104,8 +1273,10 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
             return 0;
         }
     };
+    println!("[Bassalt] Pipeline layout created successfully");
 
     // Create shader modules
+    println!("[Bassalt] Creating vertex shader module...");
     let vs_desc = pipeline::ShaderModuleDescriptor {
         label: Some(Cow::Borrowed("Vertex Shader")),
         runtime_checks: wgt::ShaderRuntimeChecks::default(),
@@ -1121,7 +1292,9 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
         let _ = env.throw_new("java/lang/RuntimeException", &msg);
         return 0;
     }
+    println!("[Bassalt] Vertex shader module created successfully");
 
+    println!("[Bassalt] Creating fragment shader module...");
     let fs_desc = pipeline::ShaderModuleDescriptor {
         label: Some(Cow::Borrowed("Fragment Shader")),
         runtime_checks: wgt::ShaderRuntimeChecks::default(),
@@ -1137,6 +1310,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
         let _ = env.throw_new("java/lang/RuntimeException", &msg);
         return 0;
     }
+    println!("[Bassalt] Fragment shader module created successfully");
 
     // Map pipeline parameters (same as createRenderPipeline)
     let primitive_topology = match primitive_topology as u32 {
@@ -1214,7 +1388,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
         vertex: pipeline::VertexState {
             stage: pipeline::ProgrammableStageDescriptor {
                 module: vertex_shader_id,
-                entry_point: Some(Cow::Borrowed("main_vs")),
+                entry_point: Some(Cow::Borrowed("main")),
                 constants: Default::default(),
                 zero_initialize_workgroup_memory: true,
             },
@@ -1235,18 +1409,15 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
             polygon_mode: wgt::PolygonMode::Fill,
             conservative: false,
         },
-        depth_stencil: Some(wgt::DepthStencilState {
-            format: wgt::TextureFormat::Depth32Float,
-            depth_write_enabled: depth_write_enabled != 0,
-            depth_compare: if depth_test_enabled != 0 { depth_compare } else { wgt::CompareFunction::Always },
-            stencil: wgt::StencilState::default(),
-            bias: wgt::DepthBiasState::default(),
-        }),
+        // Depth testing disabled - pipelines without depth_stencil work with any render pass
+        // (with or without depth attachment). This avoids IncompatibleDepthStencilAttachment errors.
+        // To enable depth: ensure render pass always has depth attachment when using depth-enabled pipeline.
+        depth_stencil: None,
         multisample: wgt::MultisampleState::default(),
         fragment: Some(pipeline::FragmentState {
             stage: pipeline::ProgrammableStageDescriptor {
                 module: fragment_shader_id,
-                entry_point: Some(Cow::Borrowed("main_fs")),
+                entry_point: Some(Cow::Borrowed("main")),
                 constants: Default::default(),
                 zero_initialize_workgroup_memory: true,
             },
@@ -1260,20 +1431,28 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
         cache: None,
     };
 
+    // Depth format tracking for future use
+    let depth_format = resource_handles::PipelineDepthFormat::None;
+
     // Create the render pipeline
+    println!("[Bassalt] Creating render pipeline...");
     let (pipeline_id, pipeline_error) = device_context.inner()
         .device_create_render_pipeline(device_id, &pipeline_desc, None);
 
     if let Some(e) = pipeline_error {
         let msg = format!("Failed to create render pipeline: {:?}", e);
         log::error!("{}", msg);
+        println!("[Bassalt] ERROR: {}", msg);
         let _ = env.throw_new("java/lang/RuntimeException", &msg);
         return 0;
     }
+    println!("[Bassalt] Render pipeline created successfully!");
 
     let num_bindings = binding_layouts.len();
-    let handle = HANDLES.insert_render_pipeline(pipeline_id, bind_group_layout_id, binding_layouts);
-    log::info!("Created render pipeline from WGSL with handle {} (bgl: {:?}, bindings: {})", handle, bind_group_layout_id, num_bindings);
+    let handle = HANDLES.insert_render_pipeline(pipeline_id, bind_group_layout_id, binding_layouts, depth_format);
+    log::info!("Created render pipeline from WGSL with handle {} (bgl: {:?}, bindings: {}, depth: {:?})",
+               handle, bind_group_layout_id, num_bindings, depth_format);
+    println!("[Bassalt] Pipeline handle: {}", handle);
     handle as jlong
 }
 
@@ -1573,8 +1752,11 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
     };
 
     // Create bind group builder
-    let mut builder = bind_group::BindGroupBuilder::new(context, device_id);
-    let mut binding_slot = 0u32;
+    let mut builder = bind_group::BindGroupBuilder::new(context.clone(), device_id);
+
+    // IMPORTANT: Textures and samplers still use sequential ordering (for now)
+    // since they don't have name-based lookup in the shader
+    let mut texture_binding_slot = 0u32;
 
     // Add texture bindings
     if !texture_handles.is_null() {
@@ -1607,31 +1789,76 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
                             None
                         };
 
-                        builder = builder.add_texture(binding_slot, view_info.id, sampler_id, view_info.dimension);
-                        binding_slot += if sampler_id.is_some() { 2 } else { 1 };
+                        builder = builder.add_texture(texture_binding_slot, view_info.id, sampler_id, view_info.dimension, view_info.texture_id);
+                        texture_binding_slot += if sampler_id.is_some() { 2 } else { 1 };
                     }
                 }
             }
         }
     }
 
-    // Add uniform buffer bindings
-    if !uniform_handles.is_null() {
+    // Add uniform buffer bindings using NAME-based lookup
+    if !uniform_handles.is_null() && !uniform_names.is_null() {
         let unif_array: ::jni::objects::JPrimitiveArray<i64> = uniform_handles.into();
+        let names_array: ::jni::objects::JObjectArray = uniform_names.into();
 
         let uniform_count = match env.get_array_length(&unif_array) {
             Ok(len) => len as usize,
             Err(_) => 0,
         };
 
+        // Build a map from variable names (shader) to Minecraft uniform names
+        // Example: shader has "dynamic_transforms" → Minecraft sends "DynamicTransforms"
         for i in 0..uniform_count {
+            // Get uniform buffer handle
             let mut unif_handle_buf = [0i64; 1];
             if env.get_long_array_region(&unif_array, i as i32, &mut unif_handle_buf).is_ok() {
                 let unif_handle = unif_handle_buf[0];
-                if unif_handle != 0 {
-                    if let Some(buffer_info) = HANDLES.get_buffer_info(unif_handle as u64) {
-                        builder = builder.add_uniform_buffer(binding_slot, buffer_info.id, 0, buffer_info.size);
-                        binding_slot += 1;
+                if unif_handle == 0 {
+                    continue;
+                }
+
+                // Get uniform name from Java array
+                let uniform_name: Option<String> = match env.get_object_array_element(&names_array, i as i32) {
+                    Ok(name_obj) => {
+                        if name_obj.is_null() {
+                            None
+                        } else {
+                            match env.get_string(&name_obj.into()) {
+                                Ok(jstr) => Some(jstr.to_string_lossy().into_owned()),
+                                Err(_) => None,
+                            }
+                        }
+                    }
+                    Err(_) => None,
+                };
+
+                if let (Some(buffer_info), Some(mc_name)) = (HANDLES.get_buffer_info(unif_handle as u64), uniform_name) {
+                    // Find the correct binding slot by matching the uniform name
+                    // Minecraft sends capitalized type names like "DynamicTransforms"
+                    // Shaders have lowercase variable names like "dynamic_transforms"
+                    let binding_slot = if let Some(ref pipeline_info) = pipeline_layout {
+                        // Try to find matching binding by variable name
+                        pipeline_info.binding_layouts.iter()
+                            .find(|layout| {
+                                if let Some(ref var_name) = layout.variable_name {
+                                    // Match by converting both to lowercase for comparison
+                                    var_name.to_lowercase() == mc_name.to_lowercase() ||
+                                    var_name.replace("_", "").to_lowercase() == mc_name.to_lowercase()
+                                } else {
+                                    false
+                                }
+                            })
+                            .map(|layout| layout.binding)
+                    } else {
+                        None
+                    };
+
+                    if let Some(slot) = binding_slot {
+                        log::debug!("Mapping uniform '{}' to binding slot {}", mc_name, slot);
+                        builder = builder.add_uniform_buffer(slot, buffer_info.id, 0, buffer_info.size);
+                    } else {
+                        log::warn!("No binding slot found for uniform '{}'", mc_name);
                     }
                 }
             }
@@ -1651,7 +1878,12 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
     match result {
         Ok(bind_group_id) => {
             let handle = HANDLES.insert_bind_group(bind_group_id);
-            log::debug!("Created bind group with {} bindings (handle={})", binding_slot, handle);
+            let binding_count = if let Some(ref pipeline_info) = pipeline_layout {
+                pipeline_info.binding_layouts.len()
+            } else {
+                0
+            };
+            log::debug!("Created bind group with {} bindings (handle={})", binding_count, handle);
             handle as jlong
         }
         Err(e) => {
@@ -1689,6 +1921,80 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
         log::warn!("setBindGroup: invalid bind group handle {}", bind_group_handle);
         log::debug!("Bind group set (placeholder implementation)");
     }
+}
+
+// ============================================================================
+// DEBUG GROUPS AND MARKERS
+// ============================================================================
+
+/// Push a debug group in the render pass
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass_pushDebugGroup(
+    mut env: JNIEnv,
+    _class: JClass,
+    render_pass_ptr: jlong,
+    label: JString,
+) {
+    if render_pass_ptr == 0 {
+        return;
+    }
+
+    let state = unsafe { &mut *(render_pass_ptr as *mut render_pass::RenderPassState) };
+
+    // Convert Java string to Rust String
+    let label_str: String = match env.get_string(&label) {
+        Ok(s) => s.into(),
+        Err(e) => {
+            log::error!("Failed to get label string: {:?}", e);
+            return;
+        }
+    };
+
+    state.record_push_debug_group(label_str.clone());
+    log::debug!("Recorded pushDebugGroup: {}", label_str);
+}
+
+/// Pop a debug group in the render pass
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass_popDebugGroup(
+    _env: JNIEnv,
+    _class: JClass,
+    render_pass_ptr: jlong,
+) {
+    if render_pass_ptr == 0 {
+        return;
+    }
+
+    let state = unsafe { &mut *(render_pass_ptr as *mut render_pass::RenderPassState) };
+    state.record_pop_debug_group();
+    log::debug!("Recorded popDebugGroup");
+}
+
+/// Insert a debug marker in the render pass
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass_insertDebugMarker(
+    mut env: JNIEnv,
+    _class: JClass,
+    render_pass_ptr: jlong,
+    label: JString,
+) {
+    if render_pass_ptr == 0 {
+        return;
+    }
+
+    let state = unsafe { &mut *(render_pass_ptr as *mut render_pass::RenderPassState) };
+
+    // Convert Java string to Rust String
+    let label_str: String = match env.get_string(&label) {
+        Ok(s) => s.into(),
+        Err(e) => {
+            log::error!("Failed to get label string: {:?}", e);
+            return;
+        }
+    };
+
+    state.record_insert_debug_marker(label_str.clone());
+    log::debug!("Recorded insertDebugMarker: {}", label_str);
 }
 
 // ============================================================================

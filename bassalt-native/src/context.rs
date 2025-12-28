@@ -15,11 +15,22 @@ impl BasaltContext {
     pub fn new() -> Self {
         log::debug!("Initializing Basalt context");
 
+        // Enable comprehensive validation and debugging in debug builds
+        let flags = if cfg!(debug_assertions) {
+            log::info!("Debug build detected - enabling advanced validation");
+            wgt::InstanceFlags::advanced_debugging()
+        } else {
+            log::info!("Release build - using standard validation");
+            wgt::InstanceFlags::debugging()
+        };
+
         let instance_desc = wgt::InstanceDescriptor {
             backends: wgt::Backends::all(),
+            flags,
             ..Default::default()
         };
 
+        log::debug!("Instance flags: {:?}", flags);
         let global = Global::new("basalt", &instance_desc);
 
         Self {
