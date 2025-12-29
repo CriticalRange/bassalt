@@ -339,8 +339,12 @@ impl RenderPassState {
     /// Executes all recorded commands using wgpu-core 27's command_encoder_run_render_pass.
     pub fn finish_and_submit(&mut self, context: &BasaltContext, queue_id: id::QueueId) -> Result<()> {
         if !self.is_active {
+            log::warn!("Render pass is not active, skipping submit");
             return Ok(());
         }
+
+        log::info!("Finishing render pass with {} commands, color_view={:?}", 
+            self.commands.len(), self.color_view);
 
         let global = context.inner();
 
@@ -388,6 +392,13 @@ impl RenderPassState {
 
         // Take ownership of commands vec to execute them
         let commands = std::mem::take(&mut self.commands);
+        
+        if color_attachments.is_empty() {
+            log::error!("No color attachments - render pass has nothing to render to!");
+            return Err(BasaltError::Device("No color attachment".into()));
+        }
+
+        log::info!("Beginning render pass with {} color attachments", color_attachments.len());
 
         // Begin render pass
         let (mut render_pass, error) = global.command_encoder_begin_render_pass(
@@ -431,6 +442,8 @@ impl RenderPassState {
                     base_vertex,
                     first_instance,
                 } => {
+                    log::info!("DrawIndexed: indices={}, instances={}, first_idx={}, base_vtx={}", 
+                        index_count, instance_count, first_index, base_vertex);
                     if let Err(e) = global.render_pass_draw_indexed(
                         &mut render_pass,
                         *index_count,
@@ -448,6 +461,8 @@ impl RenderPassState {
                     first_vertex,
                     first_instance,
                 } => {
+                    log::debug!("Draw: vertices={}, instances={}, first_vtx={}", 
+                        vertex_count, instance_count, first_vertex);
                     if let Err(e) = global.render_pass_draw(
                         &mut render_pass,
                         *vertex_count,

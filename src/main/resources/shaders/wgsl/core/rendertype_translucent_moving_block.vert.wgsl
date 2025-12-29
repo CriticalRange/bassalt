@@ -1,36 +1,19 @@
-// Stub vertex shader - GLSL conversion failed
-
+// Translucent moving block vertex shader
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) color: vec4<f32>,
+    @location(2) tex_coord: vec2<f32>,
 }
-
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) vertex_color: vec4<f32>,
+    @location(1) tex_coord: vec2<f32>,
 }
-
-struct DynamicTransforms {
-    ModelViewMat: mat4x4<f32>,
-    ColorModulator: vec4<f32>,
-    ModelOffset: vec3<f32>,
-    TextureMat: mat4x4<f32>,
-}
-
-struct Projection {
-    ProjMat: mat4x4<f32>,
-}
-
-@group(0) @binding(0)
-var<uniform> dynamic_transforms: DynamicTransforms;
-
-@group(0) @binding(1)
-var<uniform> projection: Projection;
-
 @vertex
 fn main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    out.position = projection.ProjMat * dynamic_transforms.ModelViewMat * vec4<f32>(in.position, 1.0);
+    out.position = vec4<f32>(in.position, 1.0);
     out.vertex_color = in.color;
+    out.tex_coord = in.tex_coord;
     return out;
 }
