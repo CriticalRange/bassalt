@@ -150,7 +150,13 @@ impl BasaltDevice {
         let pl_desc = wgpu_core::binding_model::PipelineLayoutDescriptor {
             label: Some(Cow::Borrowed("Bassalt Shared Pipeline Layout")),
             bind_group_layouts: Cow::Owned(vec![bgl_id]),
-            push_constant_ranges: Cow::Borrowed(&[]),
+            // Push constants for per-draw data (128 bytes = 2 mat4x4)
+            push_constant_ranges: Cow::Owned(vec![
+                wgt::PushConstantRange {
+                    stages: wgt::ShaderStages::VERTEX | wgt::ShaderStages::FRAGMENT,
+                    range: 0..128,
+                },
+            ]),
         };
 
         let (pl_id, pl_error) = global.device_create_pipeline_layout(device_id, &pl_desc, None);

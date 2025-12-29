@@ -19,6 +19,8 @@ mod error;
 mod resource_handles;
 mod render_pass;
 mod bind_group;
+mod range_allocator;
+mod atlas;
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -1154,11 +1156,17 @@ fn create_layout_from_shaders(
         )));
     }
 
-    // Create pipeline layout
+    // Create pipeline layout with push constants for per-draw data
     let pl_desc = binding_model::PipelineLayoutDescriptor {
         label: Some(Cow::Borrowed("Pipeline Layout")),
         bind_group_layouts: Cow::Owned(vec![bgl_id]),
-        push_constant_ranges: Cow::Borrowed(&[]),
+        // Push constants: 128 bytes for model matrix + other per-draw data
+        push_constant_ranges: Cow::Owned(vec![
+            wgt::PushConstantRange {
+                stages: wgt::ShaderStages::VERTEX | wgt::ShaderStages::FRAGMENT,
+                range: 0..128,
+            },
+        ]),
     };
 
     let (pl_id, pl_error) = global.device_create_pipeline_layout(device_id, &pl_desc, None);
@@ -1687,6 +1695,53 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_setS
 
     log::debug!("Recorded setScissorRect (x={}, y={}, width={}, height={})",
         x, y, width, height);
+}
+
+/// Set push constants for per-draw data
+///
+/// This allows passing small amounts of data (up to 128 bytes) directly to shaders
+/// without creating uniform buffers. Useful for:
+/// - Model matrices
+/// - Per-draw colors
+/// - Animation parameters
+///
+/// # Arguments
+/// * `render_pass_ptr` - The active render pass
+/// * `offset` - Byte offset within the push constant range (must be 4-byte aligned)
+/// * `data` - The data to write (as byte array, must be 4-byte aligned)
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_setPushConstants(
+    mut env: JNIEnv,
+    _class: JClass,
+    _device_ptr: jlong,
+    render_pass_ptr: jlong,
+    offset: jint,
+    data: JByteArray,
+) {
+    if render_pass_ptr == 0 {
+        return;
+    }
+
+    let state = unsafe { &mut *(render_pass_ptr as *mut render_pass::RenderPassState) };
+
+    // Convert Java byte array to Rust Vec
+    let data_vec: Vec<u8> = match env.convert_byte_array(&data) {
+        Ok(arr) => arr,
+        Err(e) => {
+            log::error!("Failed to get byte array for push constants: {}", e);
+            return;
+        }
+    };
+
+    // Ensure data is 4-byte aligned
+    if data_vec.len() % 4 != 0 {
+        log::error!("Push constants data must be 4-byte aligned, got {} bytes", data_vec.len());
+        return;
+    }
+
+    state.record_set_push_constants_all(offset as u32, &data_vec);
+
+    log::debug!("Recorded setPushConstants (offset={}, size={})", offset, data_vec.len());
 }
 
 /// End render pass and submit
