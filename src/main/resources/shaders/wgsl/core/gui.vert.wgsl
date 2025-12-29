@@ -1,4 +1,23 @@
-// Stub vertex shader - GLSL conversion failed
+// GUI vertex shader - solid color rendering
+// Multi-bind-group layout matching wgpu-mc:
+// Group 0: (unused - no textures)
+// Group 1: DynamicTransforms
+// Group 2: Projection
+
+struct DynamicUniforms {
+    model_view: mat4x4<f32>,
+    color_mod: vec4<f32>,
+    model_offset: vec3<f32>,
+    _pad0: f32,
+    texture_mat: mat4x4<f32>,
+}
+
+struct ProjectionUniform {
+    proj_mat: mat4x4<f32>,
+}
+
+@group(1) @binding(0) var<uniform> uniforms: DynamicUniforms;
+@group(2) @binding(0) var<uniform> projection: ProjectionUniform;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -10,27 +29,10 @@ struct VertexOutput {
     @location(0) vertex_color: vec4<f32>,
 }
 
-struct DynamicTransforms {
-    ModelViewMat: mat4x4<f32>,
-    ColorModulator: vec4<f32>,
-    ModelOffset: vec3<f32>,
-    TextureMat: mat4x4<f32>,
-}
-
-struct Projection {
-    ProjMat: mat4x4<f32>,
-}
-
-@group(0) @binding(0)
-var<uniform> dynamic_transforms: DynamicTransforms;
-
-@group(0) @binding(1)
-var<uniform> projection: Projection;
-
 @vertex
 fn main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    out.position = projection.ProjMat * dynamic_transforms.ModelViewMat * vec4<f32>(in.position, 1.0);
-    out.vertex_color = in.color;
+    out.position = projection.proj_mat * uniforms.model_view * vec4<f32>(in.position, 1.0);
+    out.vertex_color = in.color * uniforms.color_mod;
     return out;
 }

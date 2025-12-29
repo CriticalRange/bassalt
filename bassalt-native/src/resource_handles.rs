@@ -83,8 +83,9 @@ impl Default for PipelineDepthFormat {
 #[derive(Debug, Clone)]
 pub struct RenderPipelineInfo {
     pub id: id::RenderPipelineId,
-    pub bind_group_layout_id: id::BindGroupLayoutId,
-    pub binding_layouts: Vec<BindingLayoutEntry>, // What type each binding expects
+    pub bind_group_layout_id: id::BindGroupLayoutId,  // Group 0 layout (legacy)
+    pub bind_group_layout_ids: Vec<id::BindGroupLayoutId>,  // All group layouts [0, 1, 2, ...]
+    pub binding_layouts: Vec<BindingLayoutEntry>, // What type each binding expects (group 0)
     /// What depth format this pipeline expects (None = no depth, Some = specific format)
     pub depth_format: PipelineDepthFormat,
 }
@@ -242,6 +243,7 @@ impl ResourceHandleStore {
         &self,
         pipeline_id: id::RenderPipelineId,
         bind_group_layout_id: id::BindGroupLayoutId,
+        bind_group_layout_ids: Vec<id::BindGroupLayoutId>,
         binding_layouts: Vec<BindingLayoutEntry>,
         depth_format: PipelineDepthFormat,
     ) -> u64 {
@@ -249,6 +251,7 @@ impl ResourceHandleStore {
         let info = RenderPipelineInfo {
             id: pipeline_id,
             bind_group_layout_id,
+            bind_group_layout_ids,
             binding_layouts,
             depth_format,
         };

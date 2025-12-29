@@ -234,7 +234,7 @@ impl BindGroupBuilder {
         let global = self.context.inner();
 
         // Collect our available resources by type, including texture_id for re-view creation
-        let mut texture_entries: Vec<_> = self.entries.iter()
+        let texture_entries: Vec<_> = self.entries.iter()
             .filter_map(|(binding, e)| match e {
                 BindingEntry::Texture { view_id, dimension, texture_id, .. } => 
                     Some((*binding, *view_id, *dimension, *texture_id)),
@@ -242,7 +242,7 @@ impl BindGroupBuilder {
             })
             .collect();
         
-        let mut sampler_entries: Vec<_> = self.entries.iter()
+        let sampler_entries: Vec<_> = self.entries.iter()
             .filter_map(|(binding, e)| match e {
                 BindingEntry::Texture { sampler_id: Some(s), .. } => Some((*binding, *s)),
                 _ => None,
@@ -257,6 +257,13 @@ impl BindGroupBuilder {
                 _ => None,
             })
             .collect();
+        
+        log::info!("build_with_layout: {} textures, {} samplers, {} uniforms available; layout expects {} bindings",
+            texture_entries.len(), sampler_entries.len(), uniform_entries.len(), binding_layouts.len());
+        
+        for (i, layout) in binding_layouts.iter().enumerate() {
+            log::info!("  Layout binding {}: {:?} at slot {}", i, layout.ty, layout.binding);
+        }
 
         // Build bind entries by matching layout expectations to our resources
         let mut bind_entries = Vec::new();
@@ -333,6 +340,18 @@ impl BindGroupBuilder {
                     if uniform_idx < uniform_entries.len() {
                         let (buffer_id, offset, buffer_size) = uniform_entries[uniform_idx];
                         
+                        // Check if buffer size meets shader's minimum requirement
+                        if let Some(min_size) = layout_entry.min_binding_size {
+                            if buffer_size < min_size {
+                                log::warn!(
+                                    "Buffer size {} is smaller than shader expects {} for binding {}, skipping",
+                                    buffer_size, min_size, layout_entry.binding
+                                );
+                                uniform_idx += 1;
+                                continue;
+                            }
+                        }
+                        
                         // Determine the actual size to bind
                         // If we have min_binding_size from shader, use the smaller of buffer size and shader expectation
                         // But also clamp to uniform buffer limit if it's a uniform buffer
@@ -369,7 +388,7 @@ impl BindGroupBuilder {
                         }
                         uniform_idx += 1;
                     } else {
-                        log::warn!("No buffer available for binding {}", layout_entry.binding);
+                        log::debug!("No buffer available for binding {} (expected by shader but not provided)", layout_entry.binding);
                     }
                 }
             }
@@ -389,6 +408,7 @@ impl BindGroupBuilder {
             global.device_create_bind_group(self.device_id, &bind_group_desc, None);
 
         if let Some(e) = bind_group_error {
+            log::error!("Failed to create bind group with pipeline layout: {:?}", e);
             return Err(BasaltError::Device(format!(
                 "Failed to create bind group with pipeline layout: {:?}",
                 e
@@ -396,7 +416,8 @@ impl BindGroupBuilder {
         }
 
         log::debug!(
-            "Created bind group using pipeline layout"
+            "Created bind group {:?} using pipeline layout",
+            bind_group_id
         );
 
         Ok(bind_group_id)

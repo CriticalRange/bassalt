@@ -11,6 +11,7 @@ use crate::context::BasaltContext;
 use crate::surface::BasaltSurface;
 use crate::pipeline::RenderPipelineDescriptor;
 use crate::error::{BasaltError, Result};
+use crate::bind_group_layouts::{BindGroupLayouts, BindGroupLayoutType};
 
 /// Main device wrapper
 pub struct BasaltDevice {
@@ -33,6 +34,8 @@ pub struct BasaltDevice {
     // Shared bind group layout and pipeline layout for Minecraft rendering
     shared_bind_group_layout: id::BindGroupLayoutId,
     shared_pipeline_layout: id::PipelineLayoutId,
+    // Pre-defined bind group layouts (wgpu-mc style)
+    pub bind_group_layouts: BindGroupLayouts,
 }
 
 impl BasaltDevice {
@@ -59,6 +62,9 @@ impl BasaltDevice {
         let (shared_bind_group_layout, shared_pipeline_layout) =
             Self::create_shared_layouts(&context, device_id)?;
 
+        // Create pre-defined bind group layouts (wgpu-mc style)
+        let bind_group_layouts = BindGroupLayouts::new(&context, device_id);
+
         log::info!("Created shared pipeline layout for Minecraft rendering");
 
         Ok(Self {
@@ -77,6 +83,7 @@ impl BasaltDevice {
             blit_pipeline: parking_lot::Mutex::new(None),
             shared_bind_group_layout,
             shared_pipeline_layout,
+            bind_group_layouts,
         })
     }
 
@@ -411,10 +418,10 @@ impl BasaltDevice {
             return Err(BasaltError::Wgpu(format!("Failed to set bind group: {:?}", e)));
         }
 
-        // Draw fullscreen triangle (3 vertices, no vertex buffer needed - generated in shader)
+        // Draw fullscreen quad (6 vertices for 2 triangles, wgpu-mc style)
         if let Err(e) = self.context.inner().render_pass_draw(
             &mut render_pass,
-            3, // vertex count
+            6, // vertex count (2 triangles = 6 vertices)
             1, // instance count
             0, // first vertex
             0, // first instance
@@ -510,26 +517,9 @@ impl BasaltDevice {
             return Err(BasaltError::Wgpu(format!("Failed to create pipeline layout: {:?}", e)));
         }
 
-        // Create shader module with blit shader
-        let blit_shader_source = r#"
-@vertex
-fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<f32> {
-    // Fullscreen triangle
-    let x = f32((vertex_index << 1u) & 2u);
-    let y = f32(vertex_index & 2u);
-    return vec4<f32>(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
-}
-
-@group(0) @binding(0) var src_texture: texture_2d<f32>;
-@group(0) @binding(1) var src_sampler: sampler;
-
-@fragment
-fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
-    let tex_size = vec2<f32>(textureDimensions(src_texture));
-    let uv = position.xy / tex_size;
-    return textureSample(src_texture, src_sampler, uv);
-}
-"#;
+        // Blit shader - standard fullscreen triangle pattern from rend3/Bevy/wgpu-examples
+        // This shader blits from a source texture to the swapchain
+        let blit_shader_source = include_str!("shaders/blit.wgsl");
 
         let shader_module = self.parse_wgsl(blit_shader_source)?;
         let shader_module_desc = wgpu_core::pipeline::ShaderModuleDescriptor {
@@ -645,7 +635,11 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
                 log::info!("Blit completed successfully");
             }
         } else {
-            log::warn!("No main framebuffer detected - nothing to present");
+            // No main framebuffer detected - clear the swapchain to black to avoid garbage
+            log::warn!("No main framebuffer detected - clearing swapchain to black");
+            if let Err(e) = self.clear_swapchain(swapchain_texture) {
+                log::error!("Failed to clear swapchain: {}", e);
+            }
         }
 
         // Present the surface
@@ -669,6 +663,99 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         }
     }
 
+    /// Clear the swapchain texture to black (fallback when no main framebuffer)
+    fn clear_swapchain(&self, swapchain_texture: id::TextureId) -> Result<()> {
+        // Create texture view for the swapchain
+        let view_desc = wgpu_core::resource::TextureViewDescriptor {
+            label: Some(Cow::Borrowed("Swapchain Clear View")),
+            format: None,
+            dimension: None,
+            usage: Some(wgt::TextureUsages::RENDER_ATTACHMENT),
+            range: wgt::ImageSubresourceRange {
+                aspect: wgt::TextureAspect::All,
+                base_mip_level: 0,
+                mip_level_count: None,
+                base_array_layer: 0,
+                array_layer_count: None,
+            },
+        };
+
+        let (view_id, error) = self.context.inner().texture_create_view(
+            swapchain_texture,
+            &view_desc,
+            None,
+        );
+
+        if let Some(e) = error {
+            return Err(BasaltError::Wgpu(format!("Failed to create swapchain view: {:?}", e)));
+        }
+
+        // Create command encoder
+        let encoder_desc = wgt::CommandEncoderDescriptor {
+            label: Some(Cow::Borrowed("Clear Encoder")),
+        };
+
+        let (encoder_id, error) = self.context.inner().device_create_command_encoder(
+            self.device_id,
+            &encoder_desc,
+            None,
+        );
+
+        if let Some(e) = error {
+            return Err(BasaltError::Wgpu(format!("Failed to create encoder: {:?}", e)));
+        }
+
+        // Create render pass that clears to black
+        let color_attachments = vec![Some(wgpu_core::command::RenderPassColorAttachment {
+            view: view_id,
+            resolve_target: None,
+            load_op: wgpu_core::command::LoadOp::Clear(wgt::Color::BLACK),
+            store_op: wgpu_core::command::StoreOp::Store,
+            depth_slice: None,
+        })];
+
+        let pass_desc = wgpu_core::command::RenderPassDescriptor {
+            label: Some(Cow::Borrowed("Clear Pass")),
+            color_attachments: Cow::Borrowed(&color_attachments),
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        };
+
+        // Begin and immediately end the render pass (just clears)
+        let (mut render_pass, error) = self.context.inner().command_encoder_begin_render_pass(
+            encoder_id,
+            &pass_desc,
+        );
+
+        if let Some(e) = error {
+            return Err(BasaltError::Wgpu(format!("Failed to begin clear pass: {:?}", e)));
+        }
+
+        if let Err(e) = self.context.inner().render_pass_end(&mut render_pass) {
+            return Err(BasaltError::Wgpu(format!("Failed to end clear pass: {:?}", e)));
+        }
+
+        // Finish and submit
+        let (command_buffer, error) = self.context.inner().command_encoder_finish(
+            encoder_id,
+            &wgt::CommandBufferDescriptor::default(),
+            None,
+        );
+
+        if let Some(e) = error {
+            return Err(BasaltError::Wgpu(format!("Failed to finish encoder: {:?}", e)));
+        }
+
+        self.context
+            .inner()
+            .queue_submit(self.queue_id, &[command_buffer])
+            .map_err(|e| BasaltError::Wgpu(format!("Failed to submit clear: {:?}", e)))?;
+
+        log::debug!("Cleared swapchain to black");
+        Ok(())
+    }
+
     /// Set vsync mode
     pub fn set_vsync(&self, enabled: bool) -> Result<()> {
         if let Some(_surface) = &self.surface {
@@ -680,6 +767,21 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
             log::debug!("Setting vsync: {} (mode: {:?})", enabled, present_mode);
         }
         Ok(())
+    }
+
+    /// Explicitly set the main framebuffer texture for presentation
+    /// This should be called when a render pass targets a texture that will be presented
+    pub fn set_main_framebuffer(&self, texture_id: id::TextureId) {
+        log::info!("Explicitly setting main framebuffer to {:?}", texture_id);
+        *self.main_framebuffer.lock() = Some(texture_id);
+    }
+
+    /// Set the main framebuffer from a texture view ID
+    /// Looks up the parent texture of the view and sets it as the main framebuffer
+    pub fn set_main_framebuffer_from_view(&self, view_id: id::TextureViewId) {
+        // For now, we can't easily get the parent texture from a view in wgpu-core
+        // So we'll need to track this separately or use a different approach
+        log::debug!("set_main_framebuffer_from_view called with view {:?}", view_id);
     }
 
     /// Get implementation information
@@ -780,6 +882,16 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         let texture_format = self.map_texture_format(format)?;
         let texture_usage = self.map_texture_usage(usage);
 
+        // For framebuffer textures (RENDER_ATTACHMENT), also add TEXTURE_BINDING
+        // so they can be sampled in the blit shader for presentation
+        let texture_usage = if texture_usage.contains(wgt::TextureUsages::RENDER_ATTACHMENT) 
+            && width == self.swapchain_width && height == self.swapchain_height {
+            log::info!("Adding TEXTURE_BINDING to framebuffer for blit sampling");
+            texture_usage | wgt::TextureUsages::TEXTURE_BINDING
+        } else {
+            texture_usage
+        };
+
         // Filter out STORAGE_BINDING for formats that don't support it
         // WebGPU only supports storage textures for certain formats (Rgba32Float, Rgba16Float, etc.)
         // NOT for:
@@ -857,7 +969,7 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         // Detect if this is likely the main framebuffer (matches swapchain size + has RENDER_ATTACHMENT)
         if width == self.swapchain_width && height == self.swapchain_height
             && filtered_usage.contains(wgt::TextureUsages::RENDER_ATTACHMENT) {
-            log::info!("Detected main framebuffer: {:?} ({}x{})", texture_id, width, height);
+            log::info!("Detected main framebuffer: {:?} ({}x{}) with usage {:?}", texture_id, width, height, filtered_usage);
             *self.main_framebuffer.lock() = Some(texture_id);
         }
 
@@ -887,8 +999,17 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         };
         
         let desc = wgpu_core::resource::TextureViewDescriptor {
+            label: Some(Cow::Borrowed("Basalt Texture View")),
+            format: None,
             dimension: Some(view_dimension),
-            ..Default::default()
+            usage: None,
+            range: wgt::ImageSubresourceRange {
+                aspect: wgt::TextureAspect::All,
+                base_mip_level: 0,
+                mip_level_count: Some(1), // Must be 1 for render targets
+                base_array_layer: 0,
+                array_layer_count: None,
+            },
         };
         
         let (view_id, error) = self
@@ -1765,8 +1886,16 @@ pub fn create_device_from_window(
         .request_adapter(&adapter_opts, wgt::Backends::all(), None)
         .map_err(|e| BasaltError::Device(format!("Failed to find adapter: {:?}", e)))?;
 
-    // Request device
-    let device_desc = wgt::DeviceDescriptor::default();
+    // Request device with required features (matching wgpu-mc)
+    let mut device_desc = wgt::DeviceDescriptor::default();
+    device_desc.label = Some(Cow::Borrowed("Bassalt Device"));
+    device_desc.required_features = wgt::Features::DEPTH_CLIP_CONTROL
+        | wgt::Features::PUSH_CONSTANTS;
+    device_desc.required_limits = wgt::Limits {
+        max_push_constant_size: 128,
+        max_bind_groups: 8,
+        ..wgt::Limits::default()
+    };
 
     let (device_id, queue_id) = context
         .inner()
@@ -1782,13 +1911,13 @@ pub fn create_device_from_window(
         .surface_get_capabilities(surface_id, adapter_id)
         .map_err(|e| BasaltError::Surface(format!("Failed to get surface capabilities: {:?}", e)))?;
 
-    // Try to find Rgba8UnormSrgb (matches Minecraft's framebuffer format) to avoid conversion
-    // Fall back to Bgra8UnormSrgb or the first supported format
+    // Prefer Bgra8Unorm (standard for most displays, what wgpu-mc uses)
+    // Fall back to Bgra8UnormSrgb, then Rgba variants, then first available
     let surface_format = surface_caps
         .formats
         .iter()
         .copied()
-        .find(|f| matches!(f, wgt::TextureFormat::Rgba8UnormSrgb))
+        .find(|f| matches!(f, wgt::TextureFormat::Bgra8Unorm))
         .or_else(|| {
             surface_caps
                 .formats
@@ -1796,9 +1925,33 @@ pub fn create_device_from_window(
                 .copied()
                 .find(|f| matches!(f, wgt::TextureFormat::Bgra8UnormSrgb))
         })
+        .or_else(|| {
+            surface_caps
+                .formats
+                .iter()
+                .copied()
+                .find(|f| matches!(f, wgt::TextureFormat::Rgba8Unorm | wgt::TextureFormat::Rgba8UnormSrgb))
+        })
         .unwrap_or(surface_caps.formats[0]);
 
     log::info!("Selected surface format: {:?} (available: {:?})", surface_format, surface_caps.formats);
+
+    // Select present mode - prefer AutoNoVsync for lower latency (like wgpu-mc)
+    let present_mode = surface_caps
+        .present_modes
+        .iter()
+        .copied()
+        .find(|m| matches!(m, wgt::PresentMode::Mailbox))
+        .or_else(|| {
+            surface_caps
+                .present_modes
+                .iter()
+                .copied()
+                .find(|m| matches!(m, wgt::PresentMode::Immediate))
+        })
+        .unwrap_or(wgt::PresentMode::Fifo);
+
+    log::info!("Selected present mode: {:?} (available: {:?})", present_mode, surface_caps.present_modes);
 
     // Configure the surface
     let surface_config = wgt::SurfaceConfiguration {
@@ -1806,7 +1959,7 @@ pub fn create_device_from_window(
         format: surface_format,
         width: _width,
         height: _height,
-        present_mode: wgt::PresentMode::Fifo,
+        present_mode,
         desired_maximum_frame_latency: 2,
         alpha_mode: wgt::CompositeAlphaMode::Auto,
         view_formats: vec![],
