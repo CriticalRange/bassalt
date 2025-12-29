@@ -32,8 +32,8 @@ pub enum BasaltError {
     #[error("Device lost: {0}")]
     DeviceLost(String),
 
-    #[error("Out of memory")]
-    OutOfMemory,
+    #[error("Out of memory: {0}")]
+    OutOfMemory(String),
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),

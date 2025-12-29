@@ -37,6 +37,16 @@ pub enum RenderCommand {
         bind_group_id: Option<id::BindGroupId>,
         offsets: Vec<u32>,
     },
+    /// Set push constants for per-draw data
+    /// This allows passing small amounts of per-draw data without rebinding
+    SetPushConstants {
+        /// Shader stages that can access this data
+        stages: wgt::ShaderStages,
+        /// Byte offset within the push constant range
+        offset: u32,
+        /// Data to write (must be 4-byte aligned)
+        data: Vec<u8>,
+    },
     DrawIndexed {
         index_count: u32,
         instance_count: u32,
@@ -297,6 +307,33 @@ impl RenderPassState {
         self.commands.push(RenderCommand::InsertDebugMarker { label });
     }
 
+    /// Record a set push constants command
+    ///
+    /// Push constants allow passing small amounts of per-draw data directly to shaders
+    /// without the overhead of creating and binding uniform buffers.
+    ///
+    /// # Arguments
+    /// * `stages` - Which shader stages can access this data
+    /// * `offset` - Byte offset within the push constant range (must be 4-byte aligned)
+    /// * `data` - The data to write (must be 4-byte aligned)
+    ///
+    /// # Example usage in shaders (WGSL):
+    /// ```wgsl
+    /// var<push_constant> model_matrix: mat4x4<f32>;
+    /// ```
+    pub fn record_set_push_constants(&mut self, stages: wgt::ShaderStages, offset: u32, data: Vec<u8>) {
+        self.commands.push(RenderCommand::SetPushConstants { stages, offset, data });
+    }
+
+    /// Record push constants for vertex and fragment stages (convenience method)
+    pub fn record_set_push_constants_all(&mut self, offset: u32, data: &[u8]) {
+        self.record_set_push_constants(
+            wgt::ShaderStages::VERTEX | wgt::ShaderStages::FRAGMENT,
+            offset,
+            data.to_vec(),
+        );
+    }
+
     /// End the render pass and submit to the queue
     ///
     /// Executes all recorded commands using wgpu-core 27's command_encoder_run_render_pass.
@@ -441,6 +478,11 @@ impl RenderPassState {
                 RenderCommand::InsertDebugMarker { label } => {
                     // Use white color (0xFFFFFFFF) for debug markers
                     let _ = global.render_pass_insert_debug_marker(&mut render_pass, label, 0xFFFFFFFF);
+                }
+                RenderCommand::SetPushConstants { stages, offset, data } => {
+                    if let Err(e) = global.render_pass_set_push_constants(&mut render_pass, *stages, *offset, data) {
+                        log::error!("Failed to set push constants: {:?}", e);
+                    }
                 }
             }
         }
