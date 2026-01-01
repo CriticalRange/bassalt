@@ -107,6 +107,9 @@ pub struct RenderPassState {
     // Recorded commands
     commands: Vec<RenderCommand>,
     is_active: bool,
+    
+    // Track if current pipeline requires depth (for compatibility checking)
+    current_pipeline_needs_depth: bool,
 }
 
 impl RenderPassState {
@@ -156,7 +159,13 @@ impl RenderPassState {
             viewport_height: height,
             commands: Vec::with_capacity(32), // Pre-allocate for typical frame
             is_active: true,
+            current_pipeline_needs_depth: false,
         })
+    }
+    
+    /// Check if this render pass has a depth attachment
+    pub fn has_depth(&self) -> bool {
+        self.depth_view.is_some()
     }
 
     /// Get the command encoder ID
@@ -170,7 +179,17 @@ impl RenderPassState {
     }
 
     /// Record a set pipeline command
-    pub fn record_set_pipeline(&mut self, pipeline_id: id::RenderPipelineId) {
+    /// pipeline_needs_depth indicates if this pipeline was created with depth_stencil
+    pub fn record_set_pipeline(&mut self, pipeline_id: id::RenderPipelineId, pipeline_needs_depth: bool) {
+        log::info!("record_set_pipeline: pipeline={:?}, needs_depth={}, has_depth={}", 
+            pipeline_id, pipeline_needs_depth, self.has_depth());
+        
+        // Check for depth compatibility
+        if pipeline_needs_depth && !self.has_depth() {
+            log::warn!("Pipeline requires depth but render pass has no depth attachment - skipping pipeline set");
+            return;
+        }
+        self.current_pipeline_needs_depth = pipeline_needs_depth;
         self.commands.push(RenderCommand::SetPipeline { pipeline_id });
     }
 
@@ -360,27 +379,22 @@ impl RenderPassState {
             }));
         }
 
-        // NOTE: Depth attachment DISABLED to match pipelines (which all have depth_stencil: None)
-        // When pipelines are created without depth_stencil, render pass must also not have depth attachment
-        // Otherwise we get IncompatibleDepthStencilAttachment { expected: Some(Depth32Float), actual: None }
-        // To enable depth: re-enable depth in pipeline creation (lib.rs) and uncomment this
-        let depth_stencil_attachment: Option<wgpu_core::command::RenderPassDepthStencilAttachment> = None;
-        // Original depth attachment code for future use:
-        // let depth_stencil_attachment = self.depth_view.map(|view| {
-        //     wgpu_core::command::RenderPassDepthStencilAttachment {
-        //         view,
-        //         depth: wgpu_core::command::PassChannel {
-        //             load_op: Some(wgpu_core::command::LoadOp::Clear(Some(self.clear_depth))),
-        //             store_op: Some(wgpu_core::command::StoreOp::Store),
-        //             read_only: false,
-        //         },
-        //         stencil: wgpu_core::command::PassChannel {
-        //             load_op: Some(wgpu_core::command::LoadOp::Clear(Some(self.clear_stencil))),
-        //             store_op: Some(wgpu_core::command::StoreOp::Store),
-        //             read_only: false,
-        //         },
-        //     }
-        // });
+        // Depth attachment - use when depth_view is provided (matches pipeline depth_stencil)
+        let depth_stencil_attachment = self.depth_view.map(|view| {
+            wgpu_core::command::RenderPassDepthStencilAttachment {
+                view,
+                depth: wgpu_core::command::PassChannel {
+                    load_op: Some(wgpu_core::command::LoadOp::Clear(Some(self.clear_depth))),
+                    store_op: Some(wgpu_core::command::StoreOp::Store),
+                    read_only: false,
+                },
+                stencil: wgpu_core::command::PassChannel {
+                    load_op: Some(wgpu_core::command::LoadOp::Clear(Some(self.clear_stencil))),
+                    store_op: Some(wgpu_core::command::StoreOp::Store),
+                    read_only: false,
+                },
+            }
+        });
 
         let desc = wgpu_core::command::RenderPassDescriptor {
             label: Some(Cow::Borrowed("Basalt Render Pass")),

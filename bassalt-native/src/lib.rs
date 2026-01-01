@@ -78,17 +78,17 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltBackend_cre
     width: jint,
     height: jint,
 ) -> jlong {
-    let context = unsafe {
-        if context_ptr == 0 {
-            let _ = env.throw_new("java/lang/IllegalArgumentException", "Null context pointer");
-            return 0;
-        }
+    if context_ptr == 0 {
+        let _ = env.throw_new("java/lang/IllegalArgumentException", "Null context pointer");
+        return 0;
+    }
+
+    // SAFETY: Increment strong count instead of from_raw/forget pattern
+    // This is safer as it doesn't temporarily take ownership
+    let context_clone = unsafe {
+        Arc::increment_strong_count(context_ptr as *const BasaltContext);
         Arc::from_raw(context_ptr as *const BasaltContext)
     };
-
-    // We'll re-clone the Arc to keep it alive
-    let context_clone = context.clone();
-    std::mem::forget(context); // Don't drop, we still own the reference
 
     match device::create_device_from_window(
         context_clone,
@@ -116,16 +116,15 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltBackend_get
     _class: JClass,
     context_ptr: jlong,
 ) -> jstring {
-    let context = unsafe {
-        if context_ptr == 0 {
-            let _ = env.throw_new("java/lang/IllegalArgumentException", "Null context pointer");
-            return std::ptr::null_mut();
-        }
-        Arc::from_raw(context_ptr as *const BasaltContext)
-    };
+    if context_ptr == 0 {
+        let _ = env.throw_new("java/lang/IllegalArgumentException", "Null context pointer");
+        return std::ptr::null_mut();
+    }
 
+    // SAFETY: Use raw pointer dereference instead of Arc manipulation
+    // The context is kept alive by Java side, we just need to read from it
+    let context = unsafe { &*(context_ptr as *const BasaltContext) };
     let info = context.get_adapter_info();
-    std::mem::forget(context); // Keep alive
 
     match env.new_string(&info) {
         Ok(s) => s.into_raw(),
@@ -1357,6 +1356,8 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
         .device_create_shader_module(device_id, &fs_desc, fs_source, None);
 
     if let Some(e) = fs_error {
+        // Cleanup: destroy vertex shader module on fragment shader creation failure
+        device_context.inner().shader_module_drop(vertex_shader_id);
         let msg = format!("Failed to create fragment shader module: {:?}", e);
         log::error!("{}", msg);
         let _ = env.throw_new("java/lang/RuntimeException", &msg);
@@ -1386,49 +1387,62 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
         _ => wgt::CompareFunction::Less,
     };
 
+    // Helper to map blend factor from int
+    let map_blend_factor = |factor: u32| -> wgt::BlendFactor {
+        match factor {
+            0 => wgt::BlendFactor::Zero,
+            1 => wgt::BlendFactor::One,
+            2 => wgt::BlendFactor::Src,
+            3 => wgt::BlendFactor::OneMinusSrc,
+            4 => wgt::BlendFactor::Dst,
+            5 => wgt::BlendFactor::OneMinusDst,
+            6 => wgt::BlendFactor::SrcAlpha,
+            7 => wgt::BlendFactor::OneMinusSrcAlpha,
+            8 => wgt::BlendFactor::DstAlpha,
+            9 => wgt::BlendFactor::OneMinusDstAlpha,
+            _ => wgt::BlendFactor::One,
+        }
+    };
+
     let blend_state = if blend_enabled != 0 {
-        let color_factor = match blend_color_factor as u32 {
-            0 => wgt::BlendFactor::Zero,
-            1 => wgt::BlendFactor::One,
-            2 => wgt::BlendFactor::Src,
-            3 => wgt::BlendFactor::OneMinusSrc,
-            4 => wgt::BlendFactor::Dst,
-            5 => wgt::BlendFactor::OneMinusDst,
-            6 => wgt::BlendFactor::SrcAlpha,
-            7 => wgt::BlendFactor::OneMinusSrcAlpha,
-            8 => wgt::BlendFactor::DstAlpha,
-            9 => wgt::BlendFactor::OneMinusDstAlpha,
-            _ => wgt::BlendFactor::One,
+        // Standard alpha blending: src * srcAlpha + dst * (1 - srcAlpha)
+        // This matches OpenGL's GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA
+        let src_color_factor = map_blend_factor(blend_color_factor as u32);
+        let src_alpha_factor = map_blend_factor(blend_alpha_factor as u32);
+        
+        // Use proper destination factors based on source factors
+        // For SrcAlpha -> OneMinusSrcAlpha (standard alpha blend)
+        let dst_color_factor = match src_color_factor {
+            wgt::BlendFactor::SrcAlpha => wgt::BlendFactor::OneMinusSrcAlpha,
+            wgt::BlendFactor::One => wgt::BlendFactor::Zero,
+            _ => wgt::BlendFactor::OneMinusSrcAlpha, // Default for alpha blending
         };
-        let alpha_factor = match blend_alpha_factor as u32 {
-            0 => wgt::BlendFactor::Zero,
-            1 => wgt::BlendFactor::One,
-            2 => wgt::BlendFactor::Src,
-            3 => wgt::BlendFactor::OneMinusSrc,
-            4 => wgt::BlendFactor::Dst,
-            5 => wgt::BlendFactor::OneMinusDst,
-            6 => wgt::BlendFactor::SrcAlpha,
-            7 => wgt::BlendFactor::OneMinusSrcAlpha,
-            8 => wgt::BlendFactor::DstAlpha,
-            9 => wgt::BlendFactor::OneMinusDstAlpha,
-            _ => wgt::BlendFactor::One,
+        let dst_alpha_factor = match src_alpha_factor {
+            wgt::BlendFactor::SrcAlpha => wgt::BlendFactor::OneMinusSrcAlpha,
+            wgt::BlendFactor::One => wgt::BlendFactor::Zero,
+            _ => wgt::BlendFactor::OneMinusSrcAlpha,
         };
 
         Some(wgt::BlendState {
             color: wgt::BlendComponent {
-                src_factor: color_factor,
-                dst_factor: wgt::BlendFactor::OneMinusSrc,
+                src_factor: src_color_factor,
+                dst_factor: dst_color_factor,
                 operation: wgt::BlendOperation::Add,
             },
             alpha: wgt::BlendComponent {
-                src_factor: alpha_factor,
-                dst_factor: wgt::BlendFactor::OneMinusSrc,
+                src_factor: src_alpha_factor,
+                dst_factor: dst_alpha_factor,
                 operation: wgt::BlendOperation::Add,
             },
         })
     } else {
         None
     };
+
+    // Use Rgba8UnormSrgb for pipeline color targets - this matches Minecraft's texture format
+    // (Minecraft creates textures with RGBA8 which maps to Rgba8UnormSrgb)
+    // The swapchain may use a different format (e.g. Bgra8Unorm) but the blit shader handles conversion
+    let render_target_format = wgt::TextureFormat::Rgba8UnormSrgb;
 
     // Use the pipeline layout created from shader reflection
     // (pipeline_layout_id is already set above from create_layout_from_shaders)
@@ -1461,10 +1475,21 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
             polygon_mode: wgt::PolygonMode::Fill,
             conservative: false,
         },
-        // Depth testing disabled - pipelines without depth_stencil work with any render pass
-        // (with or without depth attachment). This avoids IncompatibleDepthStencilAttachment errors.
-        // To enable depth: ensure render pass always has depth attachment when using depth-enabled pipeline.
-        depth_stencil: None,
+        // Depth operations - enable when Java requests EITHER depth testing OR depth writing
+        // In WebGPU, we need depth_stencil state for any depth operations
+        // Pipeline depth_stencil must match render pass depth attachment
+        depth_stencil: if depth_test_enabled != 0 || depth_write_enabled != 0 {
+            Some(wgt::DepthStencilState {
+                format: wgt::TextureFormat::Depth32Float,
+                depth_write_enabled: depth_write_enabled != 0,
+                // If depth testing is disabled but writing is enabled, use Always compare
+                depth_compare: if depth_test_enabled != 0 { depth_compare } else { wgt::CompareFunction::Always },
+                stencil: wgt::StencilState::default(),
+                bias: wgt::DepthBiasState::default(),
+            })
+        } else {
+            None
+        },
         multisample: wgt::MultisampleState::default(),
         fragment: Some(pipeline::FragmentState {
             stage: pipeline::ProgrammableStageDescriptor {
@@ -1473,8 +1498,9 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
                 constants: Default::default(),
                 zero_initialize_workgroup_memory: true,
             },
+            // Use device's render target format instead of hardcoded value
             targets: Cow::Owned(vec![Some(wgt::ColorTargetState {
-                format: wgt::TextureFormat::Rgba8UnormSrgb,
+                format: render_target_format,
                 blend: blend_state,
                 write_mask: wgt::ColorWrites::ALL,
             })]),
@@ -1483,8 +1509,16 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
         cache: None,
     };
 
-    // Depth format tracking for future use
-    let depth_format = resource_handles::PipelineDepthFormat::None;
+    // Track depth format for render pass compatibility
+    // Must match the depth_stencil logic above
+    let depth_format = if depth_test_enabled != 0 || depth_write_enabled != 0 {
+        resource_handles::PipelineDepthFormat::Depth32Float
+    } else {
+        resource_handles::PipelineDepthFormat::None
+    };
+    
+    log::info!("Pipeline creation: depth_test_enabled={}, depth_write_enabled={}, depth_format={:?}",
+        depth_test_enabled, depth_write_enabled, depth_format);
 
     // Create the render pipeline
     println!("[Bassalt] Creating render pipeline...");
@@ -1492,6 +1526,9 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
         .device_create_render_pipeline(device_id, &pipeline_desc, None);
 
     if let Some(e) = pipeline_error {
+        // Cleanup: destroy shader modules on pipeline creation failure
+        device_context.inner().shader_module_drop(vertex_shader_id);
+        device_context.inner().shader_module_drop(fragment_shader_id);
         let msg = format!("Failed to create render pipeline: {:?}", e);
         log::error!("{}", msg);
         println!("[Bassalt] ERROR: {}", msg);
@@ -1545,8 +1582,11 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_begi
     };
 
     let depth_view = if depth_view_handle != 0 {
-        HANDLES.get_texture_view(depth_view_handle as u64)
+        let view = HANDLES.get_texture_view(depth_view_handle as u64);
+        log::info!("beginRenderPass: depth_view_handle={}, resolved={:?}", depth_view_handle, view);
+        view
     } else {
+        log::info!("beginRenderPass: No depth view handle provided");
         None
     };
 
@@ -1604,9 +1644,11 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_setP
 
     let state = unsafe { &mut *(render_pass_ptr as *mut render_pass::RenderPassState) };
 
-    if let Some(pipeline_id) = HANDLES.get_render_pipeline(pipeline_handle as u64) {
-        state.record_set_pipeline(pipeline_id);
-        log::debug!("Recorded setPipeline (pipeline={})", pipeline_handle);
+    if let Some(pipeline_info) = HANDLES.get_render_pipeline_info(pipeline_handle as u64) {
+        // Check if pipeline needs depth
+        let pipeline_needs_depth = pipeline_info.depth_format != resource_handles::PipelineDepthFormat::None;
+        state.record_set_pipeline(pipeline_info.id, pipeline_needs_depth);
+        log::debug!("Recorded setPipeline (pipeline={}, needs_depth={})", pipeline_handle, pipeline_needs_depth);
     } else {
         log::error!("Invalid pipeline handle: {}", pipeline_handle);
     }
@@ -2790,4 +2832,96 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltCommandEnc
     } else {
         log::debug!("Copied {}x{} texture to buffer at offset {}", width, height, buffer_offset);
     }
+}
+
+// ============================================================================
+// FENCE AND QUERY OPERATIONS
+// ============================================================================
+
+/// Get current submission index for fence tracking
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_sync_BassaltFence_getSubmissionIndex(
+    _env: JNIEnv,
+    _class: JClass,
+    device_ptr: jlong,
+) -> jlong {
+    if device_ptr == 0 {
+        return 0;
+    }
+    let device = unsafe { &*(device_ptr as *const BasaltDevice) };
+    device.get_submission_index() as jlong
+}
+
+/// Poll device for completed work
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_sync_BassaltFence_pollDevice(
+    _env: JNIEnv,
+    _class: JClass,
+    device_ptr: jlong,
+    wait: jboolean,
+) -> jboolean {
+    if device_ptr == 0 {
+        return 0;
+    }
+    let device = unsafe { &*(device_ptr as *const BasaltDevice) };
+    device.poll(wait != 0) as jboolean
+}
+
+/// Check if work up to submission index is complete
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_sync_BassaltFence_isWorkComplete(
+    _env: JNIEnv,
+    _class: JClass,
+    device_ptr: jlong,
+    submission_index: jlong,
+) -> jboolean {
+    if device_ptr == 0 {
+        return 1; // Treat as complete if no device
+    }
+    let device = unsafe { &*(device_ptr as *const BasaltDevice) };
+    device.is_work_complete(submission_index as u64) as jboolean
+}
+
+/// Check if timestamp queries are supported
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_sync_BassaltQuery_isTimestampQuerySupported(
+    _env: JNIEnv,
+    _class: JClass,
+    _device_ptr: jlong,
+) -> jboolean {
+    // Timestamp queries require special feature support
+    // For now, return false to use CPU fallback
+    0
+}
+
+/// Create timestamp query (stub - returns 0 for CPU fallback)
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_sync_BassaltQuery_createTimestampQuery(
+    _env: JNIEnv,
+    _class: JClass,
+    _device_ptr: jlong,
+) -> jlong {
+    0
+}
+
+/// Destroy timestamp query (stub)
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_sync_BassaltQuery_destroyTimestampQuery(
+    _env: JNIEnv,
+    _class: JClass,
+    _device_ptr: jlong,
+    _query_ptr: jlong,
+) {
+    // No-op for CPU fallback
+}
+
+/// Get timestamp value (stub - returns -1 for CPU fallback)
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_sync_BassaltQuery_getTimestampValue(
+    _env: JNIEnv,
+    _class: JClass,
+    _device_ptr: jlong,
+    _query_ptr: jlong,
+) -> jlong {
+    -1
 }

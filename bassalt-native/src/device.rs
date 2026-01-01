@@ -220,13 +220,36 @@ impl BasaltDevice {
             None,
         ).map_err(|e| BasaltError::Surface(format!("Failed to acquire swapchain texture: {:?}", e)))?;
 
+        // Check surface status for potential issues
+        use wgt::SurfaceStatus;
+        match output.status {
+            SurfaceStatus::Good => {}
+            SurfaceStatus::Suboptimal => {
+                log::warn!("Swapchain is suboptimal - may need reconfiguration");
+                // Continue anyway, but the surface should be reconfigured
+            }
+            SurfaceStatus::Timeout => {
+                return Err(BasaltError::Surface("Swapchain acquire timeout".into()));
+            }
+            SurfaceStatus::Outdated => {
+                return Err(BasaltError::Surface("Swapchain outdated - needs reconfiguration".into()));
+            }
+            SurfaceStatus::Lost => {
+                return Err(BasaltError::DeviceLost("Surface lost".into()));
+            }
+            SurfaceStatus::Unknown => {
+                log::warn!("Unknown swapchain status");
+                // Treat as potentially problematic but continue
+            }
+        }
+
         let texture_id = output.texture
             .ok_or_else(|| BasaltError::Surface("Swapchain texture not available".into()))?;
 
         // Cache it
         *self.current_swapchain_texture.lock() = Some(texture_id);
 
-        log::info!("Acquired swapchain texture: {:?}", texture_id);
+        log::info!("Acquired swapchain texture: {:?} (status: {:?})", texture_id, output.status);
         Ok(texture_id)
     }
 
@@ -817,6 +840,47 @@ impl BasaltDevice {
     /// Get the device ID
     pub fn get_device_id(&self) -> id::DeviceId {
         self.device_id
+    }
+
+    /// Get the render target format (swapchain format)
+    /// Used for pipeline color target state to match actual render targets
+    pub fn get_render_target_format(&self) -> wgt::TextureFormat {
+        self.swapchain_format
+    }
+
+    /// Get the swapchain dimensions
+    pub fn get_swapchain_size(&self) -> (u32, u32) {
+        (self.swapchain_width, self.swapchain_height)
+    }
+
+    /// Get current submission index for fence tracking
+    pub fn get_submission_index(&self) -> u64 {
+        // wgpu-core tracks submissions internally
+        // Poll to process any pending work
+        let _ = self.context.inner().device_poll(self.device_id, wgt::PollType::Poll);
+        0 // Simplified - always returns 0, poll handles completion
+    }
+
+    /// Poll device for completed work
+    pub fn poll(&self, wait: bool) -> bool {
+        let poll_type = if wait {
+            wgt::PollType::wait_indefinitely()
+        } else {
+            wgt::PollType::Poll
+        };
+        match self.context.inner().device_poll(self.device_id, poll_type) {
+            Ok(status) => status.is_queue_empty(),
+            Err(_) => true,
+        }
+    }
+
+    /// Check if work up to submission index is complete
+    pub fn is_work_complete(&self, _submission_index: u64) -> bool {
+        // Poll and check - simplified implementation
+        match self.context.inner().device_poll(self.device_id, wgt::PollType::Poll) {
+            Ok(status) => status.is_queue_empty(),
+            Err(_) => true,
+        }
     }
 
     /// Create a buffer
@@ -1570,75 +1634,86 @@ impl BasaltDevice {
         result
     }
 
+    /// Map texture usage from Bassalt's usage constants to wgpu
+    /// These match BassaltBackend.java TEXTURE_USAGE_* constants
     fn map_texture_usage(&self, usage: u32) -> wgt::TextureUsages {
         let mut result = wgt::TextureUsages::empty();
 
-        const COPY_SRC: u32 = 1 << 0;
-        const COPY_DST: u32 = 1 << 1;
-        const TEXTURE_BINDING: u32 = 1 << 2;
-        const STORAGE_BINDING: u32 = 1 << 3;
-        const RENDER_ATTACHMENT: u32 = 1 << 4;
+        // Bassalt texture usage constants (from BassaltBackend.java)
+        const TEXTURE_USAGE_COPY_SRC: u32 = 1 << 0;          // 1
+        const TEXTURE_USAGE_COPY_DST: u32 = 1 << 1;          // 2
+        const TEXTURE_USAGE_TEXTURE_BINDING: u32 = 1 << 2;   // 4
+        const TEXTURE_USAGE_STORAGE_BINDING: u32 = 1 << 3;   // 8
+        const TEXTURE_USAGE_RENDER_ATTACHMENT: u32 = 1 << 4; // 16
 
-        if usage & COPY_SRC != 0 {
+        if usage & TEXTURE_USAGE_COPY_SRC != 0 {
             result |= wgt::TextureUsages::COPY_SRC;
         }
-        if usage & COPY_DST != 0 {
+        if usage & TEXTURE_USAGE_COPY_DST != 0 {
             result |= wgt::TextureUsages::COPY_DST;
         }
-        if usage & TEXTURE_BINDING != 0 {
+        if usage & TEXTURE_USAGE_TEXTURE_BINDING != 0 {
             result |= wgt::TextureUsages::TEXTURE_BINDING;
         }
-        if usage & STORAGE_BINDING != 0 {
+        if usage & TEXTURE_USAGE_STORAGE_BINDING != 0 {
             result |= wgt::TextureUsages::STORAGE_BINDING;
         }
-        if usage & RENDER_ATTACHMENT != 0 {
+        if usage & TEXTURE_USAGE_RENDER_ATTACHMENT != 0 {
             result |= wgt::TextureUsages::RENDER_ATTACHMENT;
         }
 
         result
     }
 
+    /// Map texture format from Bassalt's format constants to wgpu
+    /// These match BassaltBackend.java FORMAT_* constants
     fn map_texture_format(&self, format: u32) -> Result<wgt::TextureFormat> {
-        const RGBA8: u32 = 0;
-        const BGRA8: u32 = 1;
-        const RGB8: u32 = 2;
-        const RG8: u32 = 3;
-        const R8: u32 = 4;
-        const RGBA16F: u32 = 5;
-        const RGBA32F: u32 = 6;
-        const DEPTH24: u32 = 7;
-        const DEPTH32F: u32 = 8;
-        const DEPTH24_STENCIL8: u32 = 9;
+        // Bassalt format constants (from BassaltBackend.java)
+        const FORMAT_RGBA8: u32 = 0;
+        const FORMAT_BGRA8: u32 = 1;
+        const FORMAT_RGB8: u32 = 2;
+        const FORMAT_RG8: u32 = 3;
+        const FORMAT_R8: u32 = 4;
+        const FORMAT_RGBA16F: u32 = 5;
+        const FORMAT_RGBA32F: u32 = 6;
+        const FORMAT_DEPTH24: u32 = 7;
+        const FORMAT_DEPTH32F: u32 = 8;
+        const FORMAT_DEPTH24_STENCIL8: u32 = 9;
 
         Ok(match format {
-            RGBA8 => wgt::TextureFormat::Rgba8UnormSrgb,
-            BGRA8 => wgt::TextureFormat::Bgra8UnormSrgb,
-            RGB8 => wgt::TextureFormat::Rgba8UnormSrgb,
-            RG8 => wgt::TextureFormat::Rg8Unorm,
-            R8 => wgt::TextureFormat::R8Unorm,
-            RGBA16F => wgt::TextureFormat::Rgba16Float,
-            RGBA32F => wgt::TextureFormat::Rgba32Float,
-            DEPTH24 => wgt::TextureFormat::Depth24Plus,
-            DEPTH32F => wgt::TextureFormat::Depth32Float,
-            DEPTH24_STENCIL8 => wgt::TextureFormat::Depth24PlusStencil8,
+            FORMAT_RGBA8 => wgt::TextureFormat::Rgba8UnormSrgb,
+            FORMAT_BGRA8 => wgt::TextureFormat::Bgra8UnormSrgb,
+            FORMAT_RGB8 => wgt::TextureFormat::Rgba8UnormSrgb, // No RGB8, use RGBA8
+            FORMAT_RG8 => wgt::TextureFormat::Rg8Unorm,
+            FORMAT_R8 => wgt::TextureFormat::R8Unorm,
+            FORMAT_RGBA16F => wgt::TextureFormat::Rgba16Float,
+            FORMAT_RGBA32F => wgt::TextureFormat::Rgba32Float,
+            FORMAT_DEPTH24 => wgt::TextureFormat::Depth24Plus,
+            FORMAT_DEPTH32F => wgt::TextureFormat::Depth32Float,
+            FORMAT_DEPTH24_STENCIL8 => wgt::TextureFormat::Depth24PlusStencil8,
             _ => return Err(BasaltError::InvalidParameter(format!("Unknown texture format: {}", format))),
         })
     }
 
+    /// Map address mode from Minecraft's AddressMode enum to wgpu
+    /// Minecraft 26.1 uses: REPEAT(0), CLAMP_TO_EDGE(1)
     fn map_address_mode(&self, mode: u32) -> Result<wgt::AddressMode> {
         Ok(match mode {
-            0 => wgt::AddressMode::Repeat,
-            1 => wgt::AddressMode::MirrorRepeat,
-            2 => wgt::AddressMode::ClampToEdge,
+            0 => wgt::AddressMode::Repeat,       // AddressMode.REPEAT
+            1 => wgt::AddressMode::ClampToEdge,  // AddressMode.CLAMP_TO_EDGE
+            // Extended modes (not in MC but kept for compatibility)
+            2 => wgt::AddressMode::MirrorRepeat,
             3 => wgt::AddressMode::ClampToBorder,
             _ => return Err(BasaltError::InvalidParameter(format!("Unknown address mode: {}", mode))),
         })
     }
 
+    /// Map filter mode from Minecraft's FilterMode enum to wgpu
+    /// Minecraft 26.1 uses: NEAREST(0), LINEAR(1)
     fn map_filter_mode(&self, mode: u32) -> Result<wgt::FilterMode> {
         Ok(match mode {
-            0 => wgt::FilterMode::Nearest,
-            1 => wgt::FilterMode::Linear,
+            0 => wgt::FilterMode::Nearest,  // FilterMode.NEAREST
+            1 => wgt::FilterMode::Linear,   // FilterMode.LINEAR
             _ => return Err(BasaltError::InvalidParameter(format!("Unknown filter mode: {}", mode))),
         })
     }
