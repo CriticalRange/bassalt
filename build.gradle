@@ -155,6 +155,8 @@ jar {
 
 // Pass system properties to the runClient task
 tasks.named('runClient') {
+	dependsOn copyNativeLibrary
+
 	// Enable mixin debugging - exports transformed classes to run/.mixin.out/
 	jvmArgs(
 		"-Dmixin.debug.export=true",
