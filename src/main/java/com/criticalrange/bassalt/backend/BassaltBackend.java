@@ -201,9 +201,15 @@ public class BassaltBackend implements GpuBackend {
      * Create a new Bassalt backend instance
      */
     public BassaltBackend() {
+        // Initialize native logging bridge first
+        BassaltLogger.initNativeLogger();
+        
+        // Test the logging bridge
+        LoggingTest.testLogging();
+        
         this.contextPtr = init();
         if (this.contextPtr == 0) {
-            throw new RuntimeException("Failed to initialize Bassalt renderer");
+            throw new RuntimeException("Failed to initialize Basalt renderer");
         }
         // TODO: getAdapterInfo is temporarily disabled due to JNI linking issue
         // System.out.println("[Bassalt] Backend initialized: " +

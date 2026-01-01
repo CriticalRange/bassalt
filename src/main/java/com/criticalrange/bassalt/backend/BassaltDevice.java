@@ -165,7 +165,8 @@ public class BassaltDevice implements GpuDevice {
         int basaltUsage = toBassaltTextureUsage(usage);
 
         long ptr = createTexture(nativePtr, width, height, depthOrLayers, mipLevels, basaltFormat, basaltUsage);
-        return new BassaltTexture(this, ptr, format, width, height);
+        String labelStr = label != null ? label.get() : "BassaltTexture";
+        return new BassaltTexture(this, ptr, usage, labelStr, format, width, height, depthOrLayers, mipLevels);
     }
 
     @Override

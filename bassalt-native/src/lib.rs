@@ -5,6 +5,7 @@
 #![allow(dead_code)]
 
 mod jni;
+mod java_logger;
 mod context;
 mod device;
 mod adapter;
@@ -46,7 +47,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltBackend_ini
     _env: JNIEnv,
     _class: JClass,
 ) -> jlong {
-    jni::init_logging();
+    java_logger::init_java_logging();
 
     let context = Arc::new(BasaltContext::new());
     match GLOBAL_CONTEXT.set(context.clone()) {
@@ -1093,7 +1094,7 @@ fn create_layout_from_shaders(
                                         (naga::ImageDimension::Cube, true) => wgt::TextureViewDimension::CubeArray,
                                         _ => wgt::TextureViewDimension::D2, // Default fallback
                                     };
-                                    log::debug!("Found texture at binding {}: dimension {:?}", binding.binding, view_dimension);
+                                    log::info!("Found texture at binding {}: dimension {:?} (naga dim={:?}, arrayed={})", binding.binding, view_dimension, dim, arrayed);
                                     (wgt::BindingType::Texture {
                                         sample_type: wgt::TextureSampleType::Float { filterable: true },
                                         view_dimension,
@@ -1197,7 +1198,9 @@ fn create_layout_from_shaders(
         })
         .unwrap_or_default();
 
-    log::debug!("Creating pipeline layout with {} bind groups", bind_group_layout_ids.len());
+    log::info!("Creating pipeline layout with {} bind groups, binding_layouts: {:?}", 
+        bind_group_layout_ids.len(),
+        binding_layouts.iter().map(|e| (e.binding, e.ty, e.expected_dimension)).collect::<Vec<_>>());
 
     // Create pipeline layout with all bind group layouts
     let pl_desc = binding_model::PipelineLayoutDescriptor {
@@ -1427,12 +1430,12 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
         Some(wgt::BlendState {
             color: wgt::BlendComponent {
                 src_factor: color_factor,
-                dst_factor: wgt::BlendFactor::OneMinusSrc,
+                dst_factor: wgt::BlendFactor::OneMinusSrcAlpha,
                 operation: wgt::BlendOperation::Add,
             },
             alpha: wgt::BlendComponent {
                 src_factor: alpha_factor,
-                dst_factor: wgt::BlendFactor::OneMinusSrc,
+                dst_factor: wgt::BlendFactor::OneMinusSrcAlpha,
                 operation: wgt::BlendOperation::Add,
             },
         })
@@ -2212,11 +2215,13 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
             }
         }
 
-        // Check if pipeline expects textures in group 0
-        let pipeline_expects_textures = if let Some(ref info) = pipeline_layout {
-            info.binding_layouts.iter().any(|e| e.ty == resource_handles::BindingLayoutType::Texture)
+        // Check if pipeline expects textures in group 0 and get expected dimension
+        let (pipeline_expects_textures, expected_texture_dim) = if let Some(ref info) = pipeline_layout {
+            let texture_entry = info.binding_layouts.iter()
+                .find(|e| e.ty == resource_handles::BindingLayoutType::Texture);
+            (texture_entry.is_some(), texture_entry.and_then(|e| e.expected_dimension))
         } else {
-            texture_binding_slot > 0 // Fall back to checking if we have textures
+            (texture_binding_slot > 0, None) // Fall back to checking if we have textures
         };
         
         // Get the pipeline's group 0 layout
@@ -2232,6 +2237,10 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
                 device.bind_group_layouts.get(bind_group_layouts::BindGroupLayoutType::TextureSampler)
             );
             
+            // Use pipeline's expected dimension, or fall back to D2
+            let texture_dimension = expected_texture_dim.unwrap_or(wgt::TextureViewDimension::D2);
+            log::info!("Creating bind group 0 with texture dimension {:?}", texture_dimension);
+            
             if let Some(layout_id) = layout_id {
                 let result = builder.build_with_layout(
                     layout_id,
@@ -2241,7 +2250,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
                             ty: resource_handles::BindingLayoutType::Texture,
                             variable_name: Some("Sampler0".to_string()),
                             min_binding_size: None,
-                            expected_dimension: Some(wgt::TextureViewDimension::D2),
+                            expected_dimension: Some(texture_dimension),
                         },
                         resource_handles::BindingLayoutEntry {
                             binding: 1,
@@ -2316,15 +2325,24 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
                 };
 
                 if let (Some(buffer_info), Some(mc_name)) = (HANDLES.get_buffer_info(unif_handle as u64), uniform_name) {
+                    // Use slice size if provided, otherwise use full buffer size
+                    let actual_size = if unif_size > 0 { unif_size } else { buffer_info.size };
+                    
+                    // Log uniform info for debugging
+                    let num_layouts = pipeline_layout.as_ref().map(|p| p.bind_group_layout_ids.len()).unwrap_or(0);
+                    log::debug!("Processing uniform '{}' size={}, pipeline has {} bind group layouts", mc_name, actual_size, num_layouts);
+                    
                     // Check if this is a DynamicTransforms-like uniform (Group 1)
                     // Note: "Globals" is a separate 56-byte uniform, NOT DynamicTransforms (160 bytes)
                     let is_group1 = mc_name == "DynamicTransforms" || 
                                     mc_name == "ModelViewMat";
                     
-                    // Use slice size if provided, otherwise use full buffer size
-                    let actual_size = if unif_size > 0 { unif_size } else { buffer_info.size };
+                    // Only try to create group 1 if the pipeline actually expects it (has 2+ bind groups)
+                    let pipeline_expects_group1 = pipeline_layout.as_ref()
+                        .map(|info| info.bind_group_layout_ids.len() >= 2)
+                        .unwrap_or(false);
                     
-                    if is_group1 && bind_group_handles[1] == 0 {
+                    if is_group1 && bind_group_handles[1] == 0 && pipeline_expects_group1 {
                         // Use pipeline's bind group layout for group 1 (has correct min_binding_size)
                         let layout_id = if let Some(ref info) = pipeline_layout {
                             info.bind_group_layout_ids.get(1).copied()
@@ -2351,14 +2369,23 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
                                 let handle = HANDLES.insert_bind_group(bind_group_id);
                                 bind_group_handles[1] = handle as jlong;
                                 log::info!("Created bind group 1 (DynamicTransforms) from '{}' offset={} size={} with handle {}", mc_name, unif_offset, actual_size, handle);
+                            } else {
+                                log::warn!("Failed to create bind group 1 (DynamicTransforms) from '{}': {:?}", mc_name, result);
                             }
+                        } else {
+                            log::warn!("No bind group layout found for group 1 (DynamicTransforms)");
                         }
                     }
                     
                     // Check if this is a Projection uniform (Group 2)
                     let is_group2 = mc_name == "Projection" || mc_name == "ProjMat";
                     
-                    if is_group2 && bind_group_handles[2] == 0 {
+                    // Only try to create group 2 if the pipeline actually expects it (has 3+ bind groups)
+                    let pipeline_expects_group2 = pipeline_layout.as_ref()
+                        .map(|info| info.bind_group_layout_ids.len() >= 3)
+                        .unwrap_or(false);
+                    
+                    if is_group2 && bind_group_handles[2] == 0 && pipeline_expects_group2 {
                         // Use pipeline's bind group layout for group 2 (has correct min_binding_size)
                         let layout_id = if let Some(ref info) = pipeline_layout {
                             info.bind_group_layout_ids.get(2).copied()
@@ -2389,9 +2416,38 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
                                 log::warn!("Failed to create bind group 2 (Projection) from '{}' with error: {:?}", mc_name, result);
                             }
                         } else {
-                            log::warn!("Failed to get bind group layout for Projection uniform");
+                            log::warn!("Failed to get bind group layout for Projection uniform (pipeline expects group 2 but layout not found)");
                         }
                     }
+                }
+            }
+        }
+    }
+
+    // Ensure ALL required bind groups are created (even empty ones) for pipeline compatibility
+    // If pipeline has bind group layouts but we didn't create bind groups, create empty ones
+    if let Some(ref info) = pipeline_layout {
+        for (group_idx, layout_id) in info.bind_group_layout_ids.iter().enumerate() {
+            if bind_group_handles[group_idx] == 0 {
+                // Create empty bind group for this index
+                let empty_desc = wgpu_core::binding_model::BindGroupDescriptor {
+                    label: Some(Cow::Borrowed("Empty Bind Group")),
+                    layout: *layout_id,
+                    entries: Cow::Owned(vec![]),
+                };
+                
+                let (empty_bg_id, err) = context.inner().device_create_bind_group(
+                    device_id,
+                    &empty_desc,
+                    None,
+                );
+                
+                if err.is_none() {
+                    let handle = HANDLES.insert_bind_group(empty_bg_id);
+                    bind_group_handles[group_idx] = handle as jlong;
+                    log::info!("Created empty bind group {} with handle {}", group_idx, handle);
+                } else {
+                    log::warn!("Failed to create empty bind group {}: {:?}", group_idx, err);
                 }
             }
         }
@@ -2411,6 +2467,19 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
                     log::info!("Set bind group {} with handle {} on render pass", group_index, handle);
                 }
             }
+        }
+    }
+    
+    // Return success only if ALL required bind groups were created
+    // If pipeline has N bind group layouts, all N must be created
+    if let Some(ref info) = pipeline_layout {
+        let required_count = info.bind_group_layout_ids.len();
+        let created_count = bind_group_handles.iter().take(required_count).filter(|&&h| h != 0).count();
+        
+        if created_count < required_count {
+            log::warn!("createMultiBindGroups: only created {}/{} required bind groups, returning 0", 
+                created_count, required_count);
+            return 0;
         }
     }
     
@@ -2861,4 +2930,134 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltCommandEnc
     } else {
         log::debug!("Copied {}x{} texture to buffer at offset {}", width, height, buffer_offset);
     }
+}
+
+// ============================================================================
+// FENCE AND SYNCHRONIZATION
+// ============================================================================
+
+/// Get current submission index for fence tracking
+/// In wgpu, we use device polling instead of explicit submission indices
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_sync_BassaltFence_getSubmissionIndex(
+    _env: JNIEnv,
+    _class: JClass,
+    device_ptr: jlong,
+) -> jlong {
+    if device_ptr == 0 {
+        return 0;
+    }
+    let device = unsafe { &*(device_ptr as *const BasaltDevice) };
+    
+    // Poll device to process any pending work
+    let _ = device.context().inner().device_poll(
+        device.id(),
+        wgt::PollType::Poll,
+    );
+    
+    // Return current timestamp as submission index (simplified)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or(0)
+}
+
+/// Poll device for completed work
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_sync_BassaltFence_pollDevice(
+    _env: JNIEnv,
+    _class: JClass,
+    device_ptr: jlong,
+    wait: jboolean,
+) -> jboolean {
+    if device_ptr == 0 {
+        return 1; // Return true if no device
+    }
+    let device = unsafe { &*(device_ptr as *const BasaltDevice) };
+    
+    let poll_type = if wait != 0 {
+        wgt::PollType::wait_indefinitely()
+    } else {
+        wgt::PollType::Poll
+    };
+    
+    match device.context().inner().device_poll(device.id(), poll_type) {
+        Ok(status) => {
+            if status.is_queue_empty() { 1 } else { 0 }
+        }
+        Err(e) => {
+            log::warn!("Device poll error: {:?}", e);
+            1 // Treat as complete on error
+        }
+    }
+}
+
+/// Check if work up to submission index is complete
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_sync_BassaltFence_isWorkComplete(
+    _env: JNIEnv,
+    _class: JClass,
+    device_ptr: jlong,
+    _submission_index: jlong,
+) -> jboolean {
+    if device_ptr == 0 {
+        return 1; // Treat as complete if no device
+    }
+    let device = unsafe { &*(device_ptr as *const BasaltDevice) };
+    
+    // Poll and check if queue is empty
+    match device.context().inner().device_poll(device.id(), wgt::PollType::Poll) {
+        Ok(status) => {
+            if status.is_queue_empty() { 1 } else { 0 }
+        }
+        Err(_) => 1 // Treat as complete on error
+    }
+}
+
+// ============================================================================
+// TIMER QUERIES
+// ============================================================================
+
+/// Check if timestamp queries are supported
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_sync_BassaltQuery_isTimestampQuerySupported(
+    _env: JNIEnv,
+    _class: JClass,
+    _device_ptr: jlong,
+) -> jboolean {
+    // Timestamp queries require TIMESTAMP_QUERY feature
+    // For now, return false to use CPU fallback
+    0
+}
+
+/// Create timestamp query (stub - returns 0 for CPU fallback)
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_sync_BassaltQuery_createTimestampQuery(
+    _env: JNIEnv,
+    _class: JClass,
+    _device_ptr: jlong,
+) -> jlong {
+    0 // CPU fallback
+}
+
+/// Destroy timestamp query (stub)
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_sync_BassaltQuery_destroyTimestampQuery(
+    _env: JNIEnv,
+    _class: JClass,
+    _device_ptr: jlong,
+    _query_ptr: jlong,
+) {
+    // No-op for CPU fallback
+}
+
+/// Get timestamp value (stub - returns -1 for CPU fallback)
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_sync_BassaltQuery_getTimestampValue(
+    _env: JNIEnv,
+    _class: JClass,
+    _device_ptr: jlong,
+    _query_ptr: jlong,
+) -> jlong {
+    -1 // CPU fallback uses System.nanoTime() in Java
 }

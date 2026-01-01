@@ -6,6 +6,7 @@ use jni::JNIEnv;
 use log::LevelFilter;
 
 /// Initialize logging for the native library
+/// Note: This is deprecated in favor of java_logger module
 pub fn init_logging() {
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(|| {
@@ -20,6 +21,9 @@ pub fn init_logging() {
             .init();
     });
 }
+
+/// Export the Java logger initialization function
+pub use crate::java_logger::Java_com_criticalrange_bassalt_backend_BassaltLogger_initNativeLogger;
 
 /// Trait for converting Rust errors to Java exceptions
 pub trait ToJavaException {

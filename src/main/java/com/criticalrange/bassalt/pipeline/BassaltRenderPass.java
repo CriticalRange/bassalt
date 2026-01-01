@@ -367,7 +367,10 @@ public class BassaltRenderPass implements RenderPass {
                 setBindGroup0(device.getNativePtr(), nativePassPtr, 0, bindGroupPtr);
                 hasValidBindGroup = true;
             } else {
-                hasValidBindGroup = (currentPipelineHandle != 0);
+                // Bind group creation failed - this means pipeline requires bindings we can't provide
+                // Don't set hasValidBindGroup to true - the draw will be skipped
+                hasValidBindGroup = false;
+                System.err.println("[Bassalt] WARNING: Could not create bind groups for pipeline " + currentPipelineHandle);
             }
         }
     }
