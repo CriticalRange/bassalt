@@ -24,6 +24,9 @@ import java.util.OptionalLong;
 import java.util.function.BiConsumer;
 import java.util.function.Supplier;
 
+import com.criticalrange.bassalt.sync.BassaltFence;
+import com.criticalrange.bassalt.sync.BassaltQuery;
+
 /**
  * Bassalt Command Encoder - Implements Minecraft's CommandEncoder interface
  */
@@ -99,6 +102,9 @@ public class BassaltCommandEncoder implements CommandEncoder {
         }
         if (depthTexture instanceof com.criticalrange.bassalt.texture.BassaltTextureView) {
             depthPtr = ((com.criticalrange.bassalt.texture.BassaltTextureView) depthTexture).getNativePtr();
+            System.out.println("[Bassalt] createRenderPass: depthPtr=" + depthPtr);
+        } else if (depthTexture != null) {
+            System.err.println("[Bassalt] WARNING: depthTexture is NOT a BassaltTextureView! Type: " + depthTexture.getClass().getName());
         }
 
         boolean shouldClearColor = clearColor.isPresent();
@@ -312,42 +318,12 @@ public class BassaltCommandEncoder implements CommandEncoder {
 
     @Override
     public GpuFence createFence() {
-        // TODO: implement proper fence support using wgpu's fence/signaling API
-        return new GpuFence() {
-            private volatile boolean signaled = false;
-
-            @Override
-            public void close() {
-                signaled = true;
-            }
-
-            @Override
-            public boolean awaitCompletion(long timeoutMs) {
-                try {
-                    Thread.sleep(Math.min(timeoutMs, 100));
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
-                signaled = true;
-                return true;
-            }
-        };
+        return new BassaltFence(device);
     }
 
     @Override
     public GpuQuery timerQueryBegin() {
-        // TODO: implement timer queries using wgpu's timestamp queries
-        return new GpuQuery() {
-            private final long startTime = System.nanoTime();
-
-            @Override
-            public void close() {}
-
-            @Override
-            public OptionalLong getValue() {
-                return OptionalLong.of(startTime);
-            }
-        };
+        return new BassaltQuery(device);
     }
 
     public void timerQueryEnd(GpuQuery query) {

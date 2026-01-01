@@ -1,9 +1,9 @@
 package com.criticalrange.bassalt.backend;
 
-import com.mojang.blaze3d.opengl.GlBackend;
 import com.mojang.blaze3d.shaders.GpuDebugOptions;
 import com.mojang.blaze3d.shaders.ShaderSource;
 import com.mojang.blaze3d.systems.BackendCreationException;
+import com.mojang.blaze3d.systems.GpuBackend;
 import com.mojang.blaze3d.systems.WindowAndDevice;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
@@ -16,15 +16,10 @@ import java.io.InputStream;
  * Bassalt Renderer Backend - WebGPU-based implementation for Minecraft Fabric
  *
  * This backend uses a native Rust library (wgpu-core) to provide
- * hardware-accelerated
- * rendering through WebGPU APIs (Vulkan, DX12, Metal).
- *
- * Note: Extends GlBackend to satisfy Mixin @Redirect type requirements, but
- * completely
- * overrides all behavior with wgpu-based implementation.
+ * hardware-accelerated rendering through WebGPU APIs (Vulkan, DX12, Metal).
  */
 @Environment(EnvType.CLIENT)
-public class BassaltBackend extends GlBackend {
+public class BassaltBackend implements GpuBackend {
 
     static {
         boolean loaded = false;

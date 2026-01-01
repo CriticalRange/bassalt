@@ -13,8 +13,9 @@ public class BassaltTexture extends GpuTexture {
     private final long nativePtr;
     private boolean closed = false;
 
-    public BassaltTexture(BassaltDevice device, long nativePtr, TextureFormat format, int width, int height) {
-        super(0, "BassaltTexture", format, width, height, 1, 1);
+    public BassaltTexture(BassaltDevice device, long nativePtr, int usage, String label, 
+                          TextureFormat format, int width, int height, int depthOrLayers, int mipLevels) {
+        super(usage, label, format, width, height, depthOrLayers, mipLevels);
         this.device = device;
         this.nativePtr = nativePtr;
     }

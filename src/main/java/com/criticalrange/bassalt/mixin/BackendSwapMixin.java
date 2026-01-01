@@ -1,9 +1,9 @@
 package com.criticalrange.bassalt.mixin;
 
 import com.criticalrange.bassalt.backend.BassaltBackend;
+import com.mojang.blaze3d.opengl.GlBackend;
 import com.mojang.blaze3d.platform.Window;
 import com.mojang.blaze3d.systems.GpuBackend;
-import com.mojang.blaze3d.opengl.GlBackend;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.ModifyVariable;
