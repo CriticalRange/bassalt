@@ -101,6 +101,8 @@ public class BassaltCommandEncoder implements CommandEncoder {
             depthPtr = ((com.criticalrange.bassalt.texture.BassaltTextureView) depthTexture).getNativePtr();
         }
 
+        boolean shouldClearColor = clearColor.isPresent();
+        boolean shouldClearDepth = clearDepth.isPresent();
         int clear = clearColor.orElse(0xFF000000); // Opaque black default
         float depthVal = (float) clearDepth.orElse(1.0);
 
@@ -108,7 +110,9 @@ public class BassaltCommandEncoder implements CommandEncoder {
             device.getNativePtr(),
             colorPtr,
             depthPtr,
+            shouldClearColor,
             clear,
+            shouldClearDepth,
             depthVal,
             0,
             width,

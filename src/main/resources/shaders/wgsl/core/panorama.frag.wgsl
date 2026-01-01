@@ -1,12 +1,13 @@
 // Panorama fragment shader - samples cubemap texture
+// Matches MC's panorama.fsh
 
 @group(0) @binding(0)
-var panorama_texture: texture_2d<f32>;
+var Sampler0: texture_cube<f32>;  // Cubemap texture
 
 @group(0) @binding(1)
-var panorama_sampler: sampler;
+var Sampler0Sampler: sampler;
 
 @fragment
-fn main(@location(0) tex_coord: vec2<f32>) -> @location(0) vec4<f32> {
-    return textureSample(panorama_texture, panorama_sampler, tex_coord);
+fn main(@location(0) tex_coord: vec3<f32>) -> @location(0) vec4<f32> {
+    return textureSample(Sampler0, Sampler0Sampler, tex_coord);
 }

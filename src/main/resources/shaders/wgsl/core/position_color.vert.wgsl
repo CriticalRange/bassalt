@@ -1,23 +1,22 @@
 // Position-Color vertex shader
-// Multi-bind-group layout matching wgpu-mc:
-// Group 0: (unused - no textures)
+// Uniform layout:
 // Group 1: DynamicTransforms
 // Group 2: Projection
 
-struct DynamicUniforms {
-    model_view: mat4x4<f32>,
-    color_mod: vec4<f32>,
-    model_offset: vec3<f32>,
+struct DynamicTransforms {
+    ModelViewMat: mat4x4<f32>,
+    ColorModulator: vec4<f32>,
+    ModelOffset: vec3<f32>,
     _pad0: f32,
-    texture_mat: mat4x4<f32>,
+    TextureMat: mat4x4<f32>,
 }
 
-struct ProjectionUniform {
-    proj_mat: mat4x4<f32>,
+struct Projection {
+    ProjMat: mat4x4<f32>,
 }
 
-@group(1) @binding(0) var<uniform> uniforms: DynamicUniforms;
-@group(2) @binding(0) var<uniform> projection: ProjectionUniform;
+@group(1) @binding(0) var<uniform> transforms: DynamicTransforms;
+@group(2) @binding(0) var<uniform> projection: Projection;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -32,7 +31,7 @@ struct VertexOutput {
 @vertex
 fn main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    out.position = projection.proj_mat * uniforms.model_view * vec4<f32>(in.position, 1.0);
-    out.vertex_color = in.color * uniforms.color_mod;
+    out.position = projection.ProjMat * transforms.ModelViewMat * vec4<f32>(in.position, 1.0);
+    out.vertex_color = in.color * transforms.ColorModulator;
     return out;
 }

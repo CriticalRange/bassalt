@@ -360,7 +360,7 @@ impl AtlasManager {
             device_id,
             queue_id,
             DEFAULT_ATLAS_SIZE,
-            wgt::TextureFormat::Rgba8UnormSrgb,
+            wgt::TextureFormat::Rgba8Unorm,
             "Block",
         )?;
 
@@ -369,7 +369,7 @@ impl AtlasManager {
             device_id,
             queue_id,
             DEFAULT_ATLAS_SIZE,
-            wgt::TextureFormat::Rgba8UnormSrgb,
+            wgt::TextureFormat::Rgba8Unorm,
             "Entity",
         )?;
 
@@ -378,7 +378,7 @@ impl AtlasManager {
             device_id,
             queue_id,
             1024, // GUI atlas can be smaller
-            wgt::TextureFormat::Rgba8UnormSrgb,
+            wgt::TextureFormat::Rgba8Unorm,
             "GUI",
         )?;
 

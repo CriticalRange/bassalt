@@ -1,21 +1,40 @@
 // Position-Texture-Color fragment shader
+// Used for GUI textures, Mojang logo, title screen, etc.
+
+// DynamicTransforms for ColorModulator
+struct DynamicTransforms {
+    ModelViewMat: mat4x4<f32>,
+    ColorModulator: vec4<f32>,
+    ModelOffset: vec3<f32>,
+    _pad0: f32,
+    TextureMat: mat4x4<f32>,
+}
+
+// Group 0: Textures
+@group(0) @binding(0) var Sampler0: texture_2d<f32>;
+@group(0) @binding(1) var Sampler0Sampler: sampler;
+
+// Group 1: DynamicTransforms (for ColorModulator)
+@group(1) @binding(0) var<uniform> transforms: DynamicTransforms;
 
 struct FragmentInput {
     @location(0) tex_coord: vec2<f32>,
     @location(1) vertex_color: vec4<f32>,
 }
 
-@group(0) @binding(0)
-var Sampler0: texture_2d<f32>;
-
-@group(0) @binding(1)
-var Sampler0Sampler: sampler;
-
 @fragment
 fn main(in: FragmentInput) -> @location(0) vec4<f32> {
-    // DEBUG: Output vertex color which encodes MVP-transformed coordinates
-    // Expected for correct coords: gradient colors (not solid black/white/saturated)
-    // R=0.5,G=0.5 = center of screen in clip space
-    // Solid white/black/saturated = coords way outside -1 to 1 range
-    return in.vertex_color;
+    // Sample texture
+    let tex_color = textureSample(Sampler0, Sampler0Sampler, in.tex_coord);
+    
+    // Combine texture with vertex color
+    var color = tex_color * in.vertex_color;
+    
+    // Discard fully transparent pixels
+    if (color.a == 0.0) {
+        discard;
+    }
+    
+    // Apply color modulator (tint from Minecraft)
+    return color * transforms.ColorModulator;
 }

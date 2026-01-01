@@ -11,13 +11,15 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     var out: VertexOutput;
     // Use wgpu-mc style: 6 vertices for two triangles (quad)
     // This matches wgpu's coordinate system better
+    // UV: For WebGPU, texture origin is top-left, so V=0 at top
+    // Flip V to correct the image orientation
     var verts = array(
-        vec4<f32>(-1.0, -1.0, 0.0, 1.0),  // bottom-left, uv (0,1)
-        vec4<f32>(1.0, 1.0, 1.0, 0.0),    // top-right, uv (1,0)
-        vec4<f32>(-1.0, 1.0, 0.0, 0.0),   // top-left, uv (0,0)
-        vec4<f32>(-1.0, -1.0, 0.0, 1.0),  // bottom-left, uv (0,1)
-        vec4<f32>(1.0, -1.0, 1.0, 1.0),   // bottom-right, uv (1,1)
-        vec4<f32>(1.0, 1.0, 1.0, 0.0),    // top-right, uv (1,0)
+        vec4<f32>(-1.0, -1.0, 0.0, 0.0),  // bottom-left, uv (0,0) - was (0,1)
+        vec4<f32>(1.0, 1.0, 1.0, 1.0),    // top-right, uv (1,1) - was (1,0)
+        vec4<f32>(-1.0, 1.0, 0.0, 1.0),   // top-left, uv (0,1) - was (0,0)
+        vec4<f32>(-1.0, -1.0, 0.0, 0.0),  // bottom-left, uv (0,0) - was (0,1)
+        vec4<f32>(1.0, -1.0, 1.0, 0.0),   // bottom-right, uv (1,0) - was (1,1)
+        vec4<f32>(1.0, 1.0, 1.0, 1.0),    // top-right, uv (1,1) - was (1,0)
     );
     
     var pos = verts[vertex_index];
