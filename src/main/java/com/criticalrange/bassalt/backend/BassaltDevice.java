@@ -152,7 +152,8 @@ public class BassaltDevice implements GpuDevice {
         int basaltUsage = toBassaltTextureUsage(usage);
 
         long ptr = createTexture(nativePtr, width, height, depthOrLayers, mipLevels, basaltFormat, basaltUsage);
-        return new BassaltTexture(this, ptr, format, width, height);
+        String labelStr = label != null ? label.get() : "BassaltTexture";
+        return new BassaltTexture(this, ptr, usage, labelStr, format, width, height, depthOrLayers, mipLevels);
     }
 
     @Override
@@ -510,14 +511,16 @@ public class BassaltDevice implements GpuDevice {
 
     private static int toBassaltBufferUsage(int minecraftUsage) {
         int usage = 0;
-        // Map Minecraft's GpuBuffer.Usage to Bassalt's flags
-        if ((minecraftUsage & 0x01) != 0) usage |= BassaltBackend.BUFFER_USAGE_COPY_SRC;
-        if ((minecraftUsage & 0x02) != 0) usage |= BassaltBackend.BUFFER_USAGE_COPY_DST;
-        if ((minecraftUsage & 0x20) != 0) usage |= BassaltBackend.BUFFER_USAGE_VERTEX;
-        if ((minecraftUsage & 0x40) != 0) usage |= BassaltBackend.BUFFER_USAGE_INDEX;
-        if ((minecraftUsage & 0x80) != 0) usage |= BassaltBackend.BUFFER_USAGE_UNIFORM;
-        if ((minecraftUsage & 0x200) != 0) usage |= BassaltBackend.BUFFER_USAGE_STORAGE;
-        if ((minecraftUsage & 0x08) != 0) usage |= BassaltBackend.BUFFER_USAGE_INDIRECT;
+        // Minecraft's GpuBuffer.Usage flags:
+        // MAP_READ=1, MAP_WRITE=2, CLIENT_STORAGE=4, COPY_DST=8, COPY_SRC=16,
+        // VERTEX=32, INDEX=64, UNIFORM=128, UNIFORM_TEXEL_BUFFER=256
+        
+        // MAP_READ/MAP_WRITE (0x01, 0x02) - WebGPU handles mapping differently, skip for now
+        if ((minecraftUsage & 0x08) != 0) usage |= BassaltBackend.BUFFER_USAGE_COPY_DST;  // COPY_DST
+        if ((minecraftUsage & 0x10) != 0) usage |= BassaltBackend.BUFFER_USAGE_COPY_SRC;  // COPY_SRC
+        if ((minecraftUsage & 0x20) != 0) usage |= BassaltBackend.BUFFER_USAGE_VERTEX;   // VERTEX
+        if ((minecraftUsage & 0x40) != 0) usage |= BassaltBackend.BUFFER_USAGE_INDEX;    // INDEX
+        if ((minecraftUsage & 0x80) != 0) usage |= BassaltBackend.BUFFER_USAGE_UNIFORM;  // UNIFORM
 
         // WebGPU requires COPY_DST to upload buffer data, but OpenGL doesn't distinguish.
         // Always add COPY_DST so we can write to any buffer (like OpenGL).

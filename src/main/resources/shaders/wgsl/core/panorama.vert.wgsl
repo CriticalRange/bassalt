@@ -1,15 +1,33 @@
-// Panorama vertex shader - uses vertex_index for empty vertex format
+// Panorama vertex shader - cubemap skybox rendering
+
+struct DynamicUniforms {
+    model_view: mat4x4<f32>,
+    color_mod: vec4<f32>,
+    model_offset: vec3<f32>,
+    _pad0: f32,
+    texture_mat: mat4x4<f32>,
+}
+
+struct ProjectionUniform {
+    proj_mat: mat4x4<f32>,
+}
+
+@group(1) @binding(0) var<uniform> uniforms: DynamicUniforms;
+@group(2) @binding(0) var<uniform> projection: ProjectionUniform;
+
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+}
+
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
-    @location(0) tex_coord: vec2<f32>,
+    @location(0) tex_coord: vec3<f32>,
 }
 
 @vertex
-fn main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
+fn main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    let x = f32((vertex_index & 1u) ^ ((vertex_index >> 1u) & 1u));
-    let y = f32((vertex_index >> 1u) & 1u);
-    out.position = vec4<f32>(x * 2.0 - 1.0, y * 2.0 - 1.0, 0.0, 1.0);
-    out.tex_coord = vec2<f32>(x, 1.0 - y);
+    out.position = projection.proj_mat * uniforms.model_view * vec4<f32>(in.position, 1.0);
+    out.tex_coord = in.position;
     return out;
 }
