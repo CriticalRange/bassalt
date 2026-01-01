@@ -109,6 +109,10 @@ pub struct RenderPassState {
     // Recorded commands
     commands: Vec<RenderCommand>,
     is_active: bool,
+    
+    // Track which bind groups are set (for validation)
+    bind_groups_set: [bool; 4],
+    pipeline_set: bool,
 }
 
 impl RenderPassState {
@@ -162,6 +166,8 @@ impl RenderPassState {
             viewport_height: height,
             commands: Vec::with_capacity(32), // Pre-allocate for typical frame
             is_active: true,
+            bind_groups_set: [false; 4],
+            pipeline_set: false,
         })
     }
 
@@ -178,6 +184,9 @@ impl RenderPassState {
     /// Record a set pipeline command
     pub fn record_set_pipeline(&mut self, pipeline_id: id::RenderPipelineId) {
         self.commands.push(RenderCommand::SetPipeline { pipeline_id });
+        self.pipeline_set = true;
+        // Reset bind groups when pipeline changes
+        self.bind_groups_set = [false; 4];
     }
 
     /// Record a set vertex buffer command
@@ -224,6 +233,9 @@ impl RenderPassState {
             bind_group_id,
             offsets,
         });
+        if (index as usize) < self.bind_groups_set.len() {
+            self.bind_groups_set[index as usize] = true;
+        }
     }
 
     /// Record a draw indexed command
@@ -235,6 +247,13 @@ impl RenderPassState {
         base_vertex: i32,
         first_instance: u32,
     ) {
+        // Validate state before draw
+        if !self.pipeline_set {
+            log::warn!("DrawIndexed called without pipeline set!");
+        }
+        if !self.bind_groups_set[0] {
+            log::warn!("DrawIndexed called without bind group 0 set!");
+        }
         self.commands.push(RenderCommand::DrawIndexed {
             index_count,
             instance_count,
