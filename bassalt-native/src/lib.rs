@@ -590,6 +590,15 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
 
     let device = unsafe { &*(device_ptr as *const BasaltDevice) };
 
+    // Map format first so we can store it
+    let texture_format = match device.map_texture_format_public(format as u32) {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = env.throw_new("java/lang/RuntimeException", &format!("Invalid texture format: {}", e));
+            return 0;
+        }
+    };
+    
     match device.create_texture(
         width as u32,
         height as u32,
@@ -599,13 +608,14 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
         usage as u32,
     ) {
         Ok(texture_id) => {
-            // Store texture with array layer info for view dimension detection
+            // Store texture with array layer info and format for debugging
             let handle = HANDLES.insert_texture(
                 texture_id,
                 depth as u32,
-                wgt::TextureDimension::D2, // All our textures are 2D for now
+                wgt::TextureDimension::D2,
+                texture_format,
             );
-            log::debug!("Created texture with handle {} ({}x{}x{})", handle, width, height, depth);
+            log::info!("Created texture with handle {} ({}x{}x{}) format={:?}", handle, width, height, depth, texture_format);
             handle as jlong
         }
         Err(e) => {
@@ -1461,10 +1471,16 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
             polygon_mode: wgt::PolygonMode::Fill,
             conservative: false,
         },
-        // Depth testing disabled - pipelines without depth_stencil work with any render pass
-        // (with or without depth attachment). This avoids IncompatibleDepthStencilAttachment errors.
-        // To enable depth: ensure render pass always has depth attachment when using depth-enabled pipeline.
-        depth_stencil: None,
+        // MC is NOT consistent: uses NO_DEPTH_TEST pipelines with depth-enabled render targets
+        // WebGPU requires exact match, so we ALWAYS include depth_stencil
+        // For NO_DEPTH_TEST: use Always compare (everything passes) + no write
+        depth_stencil: Some(wgt::DepthStencilState {
+            format: wgt::TextureFormat::Depth32Float,
+            depth_write_enabled: if depth_test_enabled != 0 { depth_write_enabled != 0 } else { false },
+            depth_compare: if depth_test_enabled != 0 { depth_compare } else { wgt::CompareFunction::Always },
+            stencil: wgt::StencilState::default(),
+            bias: wgt::DepthBiasState::default(),
+        }),
         multisample: wgt::MultisampleState::default(),
         fragment: Some(pipeline::FragmentState {
             stage: pipeline::ProgrammableStageDescriptor {
@@ -1474,7 +1490,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
                 zero_initialize_workgroup_memory: true,
             },
             targets: Cow::Owned(vec![Some(wgt::ColorTargetState {
-                format: wgt::TextureFormat::Rgba8UnormSrgb,
+                format: wgt::TextureFormat::Rgba8Unorm,
                 blend: blend_state,
                 write_mask: wgt::ColorWrites::ALL,
             })]),
@@ -1483,8 +1499,8 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
         cache: None,
     };
 
-    // Depth format tracking for future use
-    let depth_format = resource_handles::PipelineDepthFormat::None;
+    // Depth format tracking - always Depth32Float since pipelines always have depth_stencil
+    let depth_format = resource_handles::PipelineDepthFormat::Depth32Float;
 
     // Create the render pipeline
     println!("[Bassalt] Creating render pipeline...");
@@ -1521,7 +1537,9 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_begi
     device_ptr: jlong,
     color_view_handle: jlong,
     depth_view_handle: jlong,
+    should_clear_color: jboolean,
     clear_color: jint,
+    should_clear_depth: jboolean,
     clear_depth: jfloat,
     clear_stencil: jint,
     width: jint,
@@ -1544,10 +1562,20 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_begi
         None
     };
 
+    // Always need depth view since pipelines always have depth_stencil
+    // If MC doesn't provide one, create a matching-size depth texture
     let depth_view = if depth_view_handle != 0 {
         HANDLES.get_texture_view(depth_view_handle as u64)
     } else {
-        None
+        // Create depth texture matching color texture dimensions
+        log::info!("MC didn't provide depth texture, creating one for {}x{}", width, height);
+        match device.get_or_create_depth_view(width as u32, height as u32) {
+            Ok(view) => Some(view),
+            Err(e) => {
+                log::error!("Failed to create depth texture: {}", e);
+                None
+            }
+        }
     };
 
     // Track the color view's parent texture for later blitting
@@ -1562,6 +1590,9 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_begi
         }
     }
 
+    log::info!("beginRenderPass: should_clear_color={}, should_clear_depth={}", 
+        should_clear_color != 0, should_clear_depth != 0);
+
     // Create render pass state
     match render_pass::RenderPassState::new(
         device.context().clone(),
@@ -1569,7 +1600,9 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_begi
         device.queue_id(),
         color_view,
         depth_view,
+        should_clear_color != 0,
         clear_color as u32,
+        should_clear_depth != 0,
         clear_depth,
         clear_stencil as u32,
         width as u32,
@@ -2044,7 +2077,45 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
             } else {
                 0
             };
-            log::debug!("Created bind group with {} bindings (handle={})", binding_count, handle);
+            log::debug!("Created bind group 0 with {} bindings (handle={})", binding_count, handle);
+            
+            // If pipeline has more than 1 bind group layout, also set bind groups on render pass
+            // and create empty bind groups for indices 1 and 2 if needed
+            if _render_pass_ptr != 0 {
+                let state = unsafe { &mut *(_render_pass_ptr as *mut render_pass::RenderPassState) };
+                
+                // Set bind group 0
+                state.record_set_bind_group(0, Some(bind_group_id), Vec::new());
+                log::info!("Set bind group 0 with handle {} on render pass", handle);
+                
+                // Create and set empty bind groups for indices 1 and 2 if pipeline expects them
+                if let Some(ref pipeline_info) = pipeline_layout {
+                    for group_idx in 1..pipeline_info.bind_group_layout_ids.len() {
+                        if let Some(layout_id) = pipeline_info.bind_group_layout_ids.get(group_idx) {
+                            // Create empty bind group for this index
+                            let empty_desc = wgpu_core::binding_model::BindGroupDescriptor {
+                                label: Some(Cow::Borrowed("Empty Bind Group")),
+                                layout: *layout_id,
+                                entries: Cow::Owned(vec![]),
+                            };
+                            
+                            let (empty_bg_id, err) = context.inner().device_create_bind_group(
+                                device_id,
+                                &empty_desc,
+                                None,
+                            );
+                            
+                            if err.is_none() {
+                                state.record_set_bind_group(group_idx as u32, Some(empty_bg_id), Vec::new());
+                                log::info!("Set empty bind group {} on render pass", group_idx);
+                            } else {
+                                log::warn!("Failed to create empty bind group for index {}: {:?}", group_idx, err);
+                            }
+                        }
+                    }
+                }
+            }
+            
             handle as jlong
         }
         Err(e) => {
@@ -2484,11 +2555,11 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltCommandEnc
         }
     };
 
-    // Convert clear color from packed RGBA to Color struct
-    let r = ((clear_color >> 24) & 0xFF) as f64 / 255.0;
-    let g = ((clear_color >> 16) & 0xFF) as f64 / 255.0;
-    let b = ((clear_color >> 8) & 0xFF) as f64 / 255.0;
-    let a = (clear_color & 0xFF) as f64 / 255.0;
+    // Convert clear color from packed ARGB (Minecraft format) to Color struct
+    let a = ((clear_color >> 24) & 0xFF) as f64 / 255.0;
+    let r = ((clear_color >> 16) & 0xFF) as f64 / 255.0;
+    let g = ((clear_color >> 8) & 0xFF) as f64 / 255.0;
+    let b = (clear_color & 0xFF) as f64 / 255.0;
     let color = wgt::Color { r, g, b, a };
 
     // Create a command encoder and clear the texture

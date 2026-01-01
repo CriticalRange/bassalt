@@ -36,6 +36,8 @@ pub struct BasaltDevice {
     shared_pipeline_layout: id::PipelineLayoutId,
     // Pre-defined bind group layouts (wgpu-mc style)
     pub bind_group_layouts: BindGroupLayouts,
+    // Depth texture cache by dimensions (width, height) -> (texture_id, view_id)
+    depth_texture_cache: parking_lot::Mutex<std::collections::HashMap<(u32, u32), (id::TextureId, id::TextureViewId)>>,
 }
 
 impl BasaltDevice {
@@ -84,6 +86,7 @@ impl BasaltDevice {
             shared_bind_group_layout,
             shared_pipeline_layout,
             bind_group_layouts,
+            depth_texture_cache: parking_lot::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -201,6 +204,72 @@ impl BasaltDevice {
     /// Get the shared pipeline layout for Minecraft rendering
     pub fn shared_pipeline_layout(&self) -> id::PipelineLayoutId {
         self.shared_pipeline_layout
+    }
+
+    /// Get or create a depth texture view for the given dimensions
+    /// Used when MC doesn't provide depth texture but pipeline requires it
+    pub fn get_or_create_depth_view(&self, width: u32, height: u32) -> Result<id::TextureViewId> {
+        let key = (width, height);
+        
+        // Check cache first
+        {
+            let cache = self.depth_texture_cache.lock();
+            if let Some((_, view_id)) = cache.get(&key) {
+                log::debug!("Using cached depth texture for {}x{}", width, height);
+                return Ok(*view_id);
+            }
+        }
+        
+        // Create new depth texture
+        log::info!("Creating depth texture for {}x{}", width, height);
+        let depth_desc = wgt::TextureDescriptor {
+            label: Some(Cow::Borrowed("Cached Depth Texture")),
+            size: wgt::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgt::TextureDimension::D2,
+            format: wgt::TextureFormat::Depth32Float,
+            usage: wgt::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: vec![],
+        };
+
+        let (texture_id, err) = self.context.inner().device_create_texture(
+            self.device_id,
+            &depth_desc,
+            None,
+        );
+
+        if let Some(e) = err {
+            return Err(BasaltError::Wgpu(format!("Failed to create depth texture: {:?}", e)));
+        }
+
+        let view_desc = wgpu_core::resource::TextureViewDescriptor {
+            label: Some(Cow::Borrowed("Cached Depth View")),
+            format: Some(wgt::TextureFormat::Depth32Float),
+            dimension: Some(wgt::TextureViewDimension::D2),
+            usage: None,
+            range: wgt::ImageSubresourceRange::default(),
+        };
+
+        let (view_id, err) = self.context.inner().texture_create_view(
+            texture_id,
+            &view_desc,
+            None,
+        );
+
+        if let Some(e) = err {
+            return Err(BasaltError::Wgpu(format!("Failed to create depth view: {:?}", e)));
+        }
+
+        // Cache it
+        self.depth_texture_cache.lock().insert(key, (texture_id, view_id));
+        log::info!("Created and cached depth texture {:?} view {:?} for {}x{}", texture_id, view_id, width, height);
+        
+        Ok(view_id)
     }
 
     /// Acquire the swapchain texture for rendering
@@ -879,7 +948,7 @@ impl BasaltDevice {
         format: u32,
         usage: u32,
     ) -> Result<id::TextureId> {
-        let texture_format = self.map_texture_format(format)?;
+        let texture_format = self.map_texture_format_public(format)?;
         let texture_usage = self.map_texture_usage(usage);
 
         // For framebuffer textures (RENDER_ATTACHMENT), also add TEXTURE_BINDING
@@ -990,9 +1059,12 @@ impl BasaltDevice {
     ) -> Result<(id::TextureViewId, wgt::TextureViewDimension)> {
         // Determine the view dimension based on array layers
         // - 1 layer = D2 (regular 2D texture)
-        // - 6 layers = Cube (cubemap) - but could also be D2Array, Minecraft uses D2Array for cubemaps
-        // - >1 layers = D2Array
-        let view_dimension = if array_layers > 1 {
+        // - 6 layers = Cube (cubemap for panorama)
+        // - >1 layers (not 6) = D2Array
+        let view_dimension = if array_layers == 6 {
+            log::info!("Creating Cube texture view for 6-layer texture (panorama cubemap)");
+            wgt::TextureViewDimension::Cube
+        } else if array_layers > 1 {
             wgt::TextureViewDimension::D2Array
         } else {
             wgt::TextureViewDimension::D2
@@ -1598,7 +1670,7 @@ impl BasaltDevice {
         result
     }
 
-    fn map_texture_format(&self, format: u32) -> Result<wgt::TextureFormat> {
+    pub fn map_texture_format_public(&self, format: u32) -> Result<wgt::TextureFormat> {
         const RGBA8: u32 = 0;
         const BGRA8: u32 = 1;
         const RGB8: u32 = 2;
@@ -1611,9 +1683,9 @@ impl BasaltDevice {
         const DEPTH24_STENCIL8: u32 = 9;
 
         Ok(match format {
-            RGBA8 => wgt::TextureFormat::Rgba8UnormSrgb,
-            BGRA8 => wgt::TextureFormat::Bgra8UnormSrgb,
-            RGB8 => wgt::TextureFormat::Rgba8UnormSrgb,
+            RGBA8 => wgt::TextureFormat::Rgba8Unorm,
+            BGRA8 => wgt::TextureFormat::Bgra8Unorm,
+            RGB8 => wgt::TextureFormat::Rgba8Unorm,
             RG8 => wgt::TextureFormat::Rg8Unorm,
             R8 => wgt::TextureFormat::R8Unorm,
             RGBA16F => wgt::TextureFormat::Rgba16Float,

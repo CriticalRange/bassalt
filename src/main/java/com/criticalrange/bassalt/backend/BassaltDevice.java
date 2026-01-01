@@ -34,51 +34,67 @@ public class BassaltDevice implements GpuDevice {
 
     // Native method declarations
     private static native String getImplementationInfo(long ptr);
+
     private static native String getVendor(long ptr);
+
     private static native String getRenderer(long ptr);
+
     private static native String getVersion(long ptr);
+
     private static native int getMaxTextureSize(long ptr);
+
     private static native int getUniformOffsetAlignment(long ptr);
+
     private static native boolean isZZeroToOne(long ptr);
+
     private static native void setVsync(long ptr, boolean enabled);
+
     private static native void presentFrame(long ptr);
+
     private static native void close(long ptr);
 
     // Buffer operations
     private static native long createBufferEmpty(long ptr, long size, int usage);
+
     private static native long createBufferData(long ptr, byte[] data, int usage);
+
     public static native void writeBuffer(long ptr, long bufferPtr, byte[] data, long offset);
+
     private static native void destroyBuffer(long ptr, long bufferPtr);
 
     // Texture operations
     private static native long createTexture(long ptr, int width, int height, int depth,
-                                              int mipLevels, int format, int usage);
+            int mipLevels, int format, int usage);
+
     private static native long createTextureView(long ptr, long texturePtr);
+
     private static native void destroyTexture(long ptr, long texturePtr);
 
     // Sampler operations
     private static native long createSampler(long ptr, int addressModeU, int addressModeV, int addressModeW,
-                                             int minFilter, int magFilter, int mipmapFilter,
-                                             float lodMinClamp, float lodMaxClamp, int maxAnisotropy);
+            int minFilter, int magFilter, int mipmapFilter,
+            float lodMinClamp, float lodMaxClamp, int maxAnisotropy);
 
     // Pipeline operations
     private static native long createRenderPipeline(long ptr, String vertexShader, String fragmentShader,
-                                                     int vertexFormat, int primitiveTopology,
-                                                     boolean depthTestEnabled, boolean depthWriteEnabled,
-                                                     int depthCompare, boolean blendEnabled,
-                                                     int blendColorFactor, int blendAlphaFactor);
+            int vertexFormat, int primitiveTopology,
+            boolean depthTestEnabled, boolean depthWriteEnabled,
+            int depthCompare, boolean blendEnabled,
+            int blendColorFactor, int blendAlphaFactor);
 
     // Create pipeline from pre-converted WGSL (for offline shader conversion)
     private static native long createNativePipelineFromWgsl(long ptr, String vertexWgsl, String fragmentWgsl,
-                                                             int vertexFormat, int primitiveTopology,
-                                                             boolean depthTestEnabled, boolean depthWriteEnabled,
-                                                             int depthCompare, boolean blendEnabled,
-                                                             int blendColorFactor, int blendAlphaFactor);
+            int vertexFormat, int primitiveTopology,
+            boolean depthTestEnabled, boolean depthWriteEnabled,
+            int depthCompare, boolean blendEnabled,
+            int blendColorFactor, int blendAlphaFactor);
 
     // Render pass operations
     public static native long beginRenderPass(long ptr, long colorTexture, long depthTexture,
-                                                 int clearColor, float clearDepth, int clearStencil,
-                                                 int width, int height);
+            boolean shouldClearColor, int clearColor, 
+            boolean shouldClearDepth, float clearDepth, int clearStencil,
+            int width, int height);
+
     public static native void setPipeline(long ptr, long renderPass, long pipeline);
 
     // Buffer operations - duplicate declarations removed, moved above
@@ -115,39 +131,36 @@ public class BassaltDevice implements GpuDevice {
 
     @Override
     public GpuSampler createSampler(
-        AddressMode addressModeU,
-        AddressMode addressModeV,
-        FilterMode minFilter,
-        FilterMode magFilter,
-        int maxAnisotropy,
-        OptionalDouble maxLod
-    ) {
+            AddressMode addressModeU,
+            AddressMode addressModeV,
+            FilterMode minFilter,
+            FilterMode magFilter,
+            int maxAnisotropy,
+            OptionalDouble maxLod) {
         long ptr = createSampler(
-            nativePtr,
-            toBassaltAddressMode(addressModeU),
-            toBassaltAddressMode(addressModeV),
-            toBassaltAddressMode(addressModeU),  // addressModeW - use U for now
-            toBassaltFilterMode(minFilter),
-            toBassaltFilterMode(magFilter),
-            toBassaltFilterMode(minFilter),  // mipmapFilter - use minFilter for now
-            0.0f,  // lodMinClamp
-            (float)maxLod.orElse(1000.0),  // lodMaxClamp
-            maxAnisotropy
-        );
+                nativePtr,
+                toBassaltAddressMode(addressModeU),
+                toBassaltAddressMode(addressModeV),
+                toBassaltAddressMode(addressModeU), // addressModeW - use U for now
+                toBassaltFilterMode(minFilter),
+                toBassaltFilterMode(magFilter),
+                toBassaltFilterMode(minFilter), // mipmapFilter - use minFilter for now
+                0.0f, // lodMinClamp
+                (float) maxLod.orElse(1000.0), // lodMaxClamp
+                maxAnisotropy);
         return new BassaltSampler(ptr, addressModeU, addressModeV, minFilter, magFilter,
-                                  maxAnisotropy, maxLod.orElse(1000.0));
+                maxAnisotropy, maxLod.orElse(1000.0));
     }
 
     @Override
     public GpuTexture createTexture(
-        @Nullable Supplier<String> label,
-        int usage,
-        TextureFormat format,
-        int width,
-        int height,
-        int depthOrLayers,
-        int mipLevels
-    ) {
+            @Nullable Supplier<String> label,
+            int usage,
+            TextureFormat format,
+            int width,
+            int height,
+            int depthOrLayers,
+            int mipLevels) {
         int basaltFormat = toBassaltTextureFormat(format);
         int basaltUsage = toBassaltTextureUsage(usage);
 
@@ -157,15 +170,15 @@ public class BassaltDevice implements GpuDevice {
 
     @Override
     public GpuTexture createTexture(
-        @Nullable String label,
-        int usage,
-        TextureFormat format,
-        int width,
-        int height,
-        int depthOrLayers,
-        int mipLevels
-    ) {
-        return createTexture(label != null ? () -> label : null, usage, format, width, height, depthOrLayers, mipLevels);
+            @Nullable String label,
+            int usage,
+            TextureFormat format,
+            int width,
+            int height,
+            int depthOrLayers,
+            int mipLevels) {
+        return createTexture(label != null ? () -> label : null, usage, format, width, height, depthOrLayers,
+                mipLevels);
     }
 
     @Override
@@ -275,7 +288,8 @@ public class BassaltDevice implements GpuDevice {
         // Get pipeline properties
         int vertexFormat = getVertexFormatIndex(pipeline.getVertexFormat());
         int primitiveTopology = getVertexFormatModeIndex(pipeline.getVertexFormatMode());
-        boolean depthTestEnabled = pipeline.getDepthTestFunction() != com.mojang.blaze3d.platform.DepthTestFunction.NO_DEPTH_TEST;
+        boolean depthTestEnabled = pipeline
+                .getDepthTestFunction() != com.mojang.blaze3d.platform.DepthTestFunction.NO_DEPTH_TEST;
         boolean depthWriteEnabled = pipeline.isWriteDepth();
         int depthCompare = getDepthCompareFunction(pipeline.getDepthTestFunction());
         boolean blendEnabled = pipeline.getBlendFunction().isPresent();
@@ -284,18 +298,17 @@ public class BassaltDevice implements GpuDevice {
 
         // Create the native pipeline from WGSL
         long nativePipelinePtr = createNativePipelineFromWgsl(
-            nativePtr,
-            vertexWgsl,
-            fragmentWgsl,
-            vertexFormat,
-            primitiveTopology,
-            depthTestEnabled,
-            depthWriteEnabled,
-            depthCompare,
-            blendEnabled,
-            blendColorFactor,
-            blendAlphaFactor
-        );
+                nativePtr,
+                vertexWgsl,
+                fragmentWgsl,
+                vertexFormat,
+                primitiveTopology,
+                depthTestEnabled,
+                depthWriteEnabled,
+                depthCompare,
+                blendEnabled,
+                blendColorFactor,
+                blendAlphaFactor);
 
         BassaltCompiledRenderPipeline compiled = new BassaltCompiledRenderPipeline(this, nativePipelinePtr);
         pipelineCache.put(cacheKey, compiled);
@@ -313,9 +326,11 @@ public class BassaltDevice implements GpuDevice {
      * Load a pre-converted WGSL shader from resources
      */
     private String loadPreconvertedWgsl(net.minecraft.resources.Identifier shaderId, String stage) {
-        // Convert shader ID to path: "minecraft:core/gui" -> "shaders/wgsl/core/gui.vert.wgsl" or "gui.frag.wgsl"
+        // Convert shader ID to path: "minecraft:core/gui" ->
+        // "shaders/wgsl/core/gui.vert.wgsl" or "gui.frag.wgsl"
         String shaderPath = shaderId.getPath(); // Returns "core/gui"
-        String resourcePath = "shaders/wgsl/" + shaderPath + "." + stage + ".wgsl"; // e.g., "shaders/wgsl/core/gui.vert.wgsl"
+        String resourcePath = "shaders/wgsl/" + shaderPath + "." + stage + ".wgsl"; // e.g.,
+                                                                                    // "shaders/wgsl/core/gui.vert.wgsl"
 
         try (var input = getClass().getResourceAsStream("/" + resourcePath)) {
             if (input == null) {
@@ -337,7 +352,8 @@ public class BassaltDevice implements GpuDevice {
         // 3 = POSITION_TEX_COLOR (3 floats + 2 floats + 4 floats)
         // 4 = POSITION_TEX_COLOR_NORMAL (3 floats + 2 floats + 4 floats + 3 floats)
         // 5 = POSITION_COLOR_TEX (3 floats + 4 floats + 2 floats)
-        // 6 = POSITION_COLOR_TEX_TEX_TEX_NORMAL (position, color, uv0, uv1, uv2, normal)
+        // 6 = POSITION_COLOR_TEX_TEX_TEX_NORMAL (position, color, uv0, uv1, uv2,
+        // normal)
         String name = format.toString().toLowerCase();
 
         // Parse the format string: "vertexformat[position, color, ...]"
@@ -357,10 +373,14 @@ public class BassaltDevice implements GpuDevice {
             boolean hasNormal = false;
 
             for (String part : parts) {
-                if (part.equals("position")) hasPosition = true;
-                else if (part.equals("color")) hasColor = true;
-                else if (part.startsWith("uv")) uvCount++;
-                else if (part.equals("normal")) hasNormal = true;
+                if (part.equals("position"))
+                    hasPosition = true;
+                else if (part.equals("color"))
+                    hasColor = true;
+                else if (part.startsWith("uv"))
+                    uvCount++;
+                else if (part.equals("normal"))
+                    hasNormal = true;
             }
 
             // Map to format index based on elements
@@ -397,7 +417,8 @@ public class BassaltDevice implements GpuDevice {
             case LINES -> BassaltBackend.PRIMITIVE_TOPOLOGY_LINE_LIST;
             case TRIANGLES -> BassaltBackend.PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
             case TRIANGLE_STRIP -> BassaltBackend.PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
-            // For quad rendering, we'll use triangle list (quad conversion happens elsewhere)
+            // For quad rendering, we'll use triangle list (quad conversion happens
+            // elsewhere)
             case QUADS -> BassaltBackend.PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
             // Line strip and debug modes fall back to line list
             case DEBUG_LINE_STRIP, DEBUG_LINES -> BassaltBackend.PRIMITIVE_TOPOLOGY_LINE_LIST;
@@ -428,7 +449,8 @@ public class BassaltDevice implements GpuDevice {
             case ONE_MINUS_SRC_ALPHA -> BassaltBackend.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
             case DST_ALPHA -> BassaltBackend.BLEND_FACTOR_DST_ALPHA;
             case ONE_MINUS_DST_ALPHA -> BassaltBackend.BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
-            case CONSTANT_COLOR, CONSTANT_ALPHA, ONE_MINUS_CONSTANT_COLOR, ONE_MINUS_CONSTANT_ALPHA, SRC_ALPHA_SATURATE ->
+            case CONSTANT_COLOR, CONSTANT_ALPHA, ONE_MINUS_CONSTANT_COLOR, ONE_MINUS_CONSTANT_ALPHA,
+                    SRC_ALPHA_SATURATE ->
                 BassaltBackend.BLEND_FACTOR_ONE; // Fallback for less common factors
         };
     }
@@ -457,6 +479,7 @@ public class BassaltDevice implements GpuDevice {
     }
 
     private static native int getMaxSupportedAnisotropy0(long ptr);
+
     private static native String getEnabledFeatures0(long ptr);
 
     @Override
@@ -511,15 +534,23 @@ public class BassaltDevice implements GpuDevice {
     private static int toBassaltBufferUsage(int minecraftUsage) {
         int usage = 0;
         // Map Minecraft's GpuBuffer.Usage to Bassalt's flags
-        if ((minecraftUsage & 0x01) != 0) usage |= BassaltBackend.BUFFER_USAGE_COPY_SRC;
-        if ((minecraftUsage & 0x02) != 0) usage |= BassaltBackend.BUFFER_USAGE_COPY_DST;
-        if ((minecraftUsage & 0x20) != 0) usage |= BassaltBackend.BUFFER_USAGE_VERTEX;
-        if ((minecraftUsage & 0x40) != 0) usage |= BassaltBackend.BUFFER_USAGE_INDEX;
-        if ((minecraftUsage & 0x80) != 0) usage |= BassaltBackend.BUFFER_USAGE_UNIFORM;
-        if ((minecraftUsage & 0x200) != 0) usage |= BassaltBackend.BUFFER_USAGE_STORAGE;
-        if ((minecraftUsage & 0x08) != 0) usage |= BassaltBackend.BUFFER_USAGE_INDIRECT;
+        if ((minecraftUsage & 0x01) != 0)
+            usage |= BassaltBackend.BUFFER_USAGE_COPY_SRC;
+        if ((minecraftUsage & 0x02) != 0)
+            usage |= BassaltBackend.BUFFER_USAGE_COPY_DST;
+        if ((minecraftUsage & 0x20) != 0)
+            usage |= BassaltBackend.BUFFER_USAGE_VERTEX;
+        if ((minecraftUsage & 0x40) != 0)
+            usage |= BassaltBackend.BUFFER_USAGE_INDEX;
+        if ((minecraftUsage & 0x80) != 0)
+            usage |= BassaltBackend.BUFFER_USAGE_UNIFORM;
+        if ((minecraftUsage & 0x200) != 0)
+            usage |= BassaltBackend.BUFFER_USAGE_STORAGE;
+        if ((minecraftUsage & 0x08) != 0)
+            usage |= BassaltBackend.BUFFER_USAGE_INDIRECT;
 
-        // WebGPU requires COPY_DST to upload buffer data, but OpenGL doesn't distinguish.
+        // WebGPU requires COPY_DST to upload buffer data, but OpenGL doesn't
+        // distinguish.
         // Always add COPY_DST so we can write to any buffer (like OpenGL).
         usage |= BassaltBackend.BUFFER_USAGE_COPY_DST;
 
@@ -539,15 +570,23 @@ public class BassaltDevice implements GpuDevice {
         int usage = 0;
         // Map Minecraft usage flags to Bassalt usage flags
         // NOTE: Minecraft and Bassalt use different bit positions for the same flags!
-        // Minecraft: COPY_DST=1, COPY_SRC=2, TEXTURE_BINDING=4, RENDER_ATTACHMENT=8, CUBEMAP=16
-        // Bassalt:   COPY_SRC=1, COPY_DST=2, TEXTURE_BINDING=4, STORAGE=8, RENDER_ATTACHMENT=16
-        if ((minecraftUsage & 0x01) != 0) usage |= BassaltBackend.TEXTURE_USAGE_COPY_DST;  // MC COPY_DST → Bassalt COPY_DST
-        if ((minecraftUsage & 0x02) != 0) usage |= BassaltBackend.TEXTURE_USAGE_COPY_SRC;  // MC COPY_SRC → Bassalt COPY_SRC
-        if ((minecraftUsage & 0x04) != 0) usage |= BassaltBackend.TEXTURE_USAGE_TEXTURE_BINDING;  // MC TEXTURE_BINDING → Bassalt TEXTURE_BINDING
-        if ((minecraftUsage & 0x08) != 0) usage |= BassaltBackend.TEXTURE_USAGE_RENDER_ATTACHMENT;  // MC RENDER_ATTACHMENT → Bassalt RENDER_ATTACHMENT
-        // Note: Minecraft's CUBEMAP_COMPATIBLE (0x10) doesn't have a direct Bassalt equivalent
+        // Minecraft: COPY_DST=1, COPY_SRC=2, TEXTURE_BINDING=4, RENDER_ATTACHMENT=8,
+        // CUBEMAP=16
+        // Bassalt: COPY_SRC=1, COPY_DST=2, TEXTURE_BINDING=4, STORAGE=8,
+        // RENDER_ATTACHMENT=16
+        if ((minecraftUsage & 0x01) != 0)
+            usage |= BassaltBackend.TEXTURE_USAGE_COPY_DST; // MC COPY_DST → Bassalt COPY_DST
+        if ((minecraftUsage & 0x02) != 0)
+            usage |= BassaltBackend.TEXTURE_USAGE_COPY_SRC; // MC COPY_SRC → Bassalt COPY_SRC
+        if ((minecraftUsage & 0x04) != 0)
+            usage |= BassaltBackend.TEXTURE_USAGE_TEXTURE_BINDING; // MC TEXTURE_BINDING → Bassalt TEXTURE_BINDING
+        if ((minecraftUsage & 0x08) != 0)
+            usage |= BassaltBackend.TEXTURE_USAGE_RENDER_ATTACHMENT; // MC RENDER_ATTACHMENT → Bassalt RENDER_ATTACHMENT
+        // Note: Minecraft's CUBEMAP_COMPATIBLE (0x10) doesn't have a direct Bassalt
+        // equivalent
 
-        // WebGPU requires COPY_DST to upload texture data, but OpenGL doesn't distinguish.
+        // WebGPU requires COPY_DST to upload texture data, but OpenGL doesn't
+        // distinguish.
         // Always add COPY_DST so we can write to any texture (like OpenGL).
         // This is safe and matches OpenGL's "any texture can be uploaded to" behavior.
         usage |= BassaltBackend.TEXTURE_USAGE_COPY_DST;
@@ -570,20 +609,27 @@ public class BassaltDevice implements GpuDevice {
     }
 
     public long createNativePipeline(String vertexWgsl, String fragmentWgsl,
-                               int vertexFormat, int primitiveTopology,
-                               boolean depthTestEnabled, boolean depthWriteEnabled,
-                               int depthCompare, boolean blendEnabled,
-                               int blendColorFactor, int blendAlphaFactor) {
-        return createRenderPipeline(nativePtr, vertexWgsl, fragmentWgsl,
+            int vertexFormat, int primitiveTopology,
+            boolean depthTestEnabled, boolean depthWriteEnabled,
+            int depthCompare, boolean blendEnabled,
+            int blendColorFactor, int blendAlphaFactor) {
+        return createNativePipelineFromWgsl(nativePtr, vertexWgsl, fragmentWgsl,
                 vertexFormat, primitiveTopology, depthTestEnabled, depthWriteEnabled,
                 depthCompare, blendEnabled, blendColorFactor, blendAlphaFactor);
     }
 
     // Public access to native render pass methods for BassaltRenderPass
     public static native void setVertexBuffer(long ptr, long renderPass, int slot, long buffer, long offset);
+
     public static native void setIndexBuffer(long ptr, long renderPass, long buffer, int indexType, long offset);
-    public static native void drawIndexed(long ptr, long renderPass, int indexCount, int instanceCount, int firstIndex, int baseVertex, int firstInstance);
-    public static native void draw(long ptr, long renderPass, int vertexCount, int instanceCount, int firstVertex, int firstInstance);
+
+    public static native void drawIndexed(long ptr, long renderPass, int indexCount, int instanceCount, int firstIndex,
+            int baseVertex, int firstInstance);
+
+    public static native void draw(long ptr, long renderPass, int vertexCount, int instanceCount, int firstVertex,
+            int firstInstance);
+
     public static native void setScissorRect(long ptr, long renderPass, int x, int y, int width, int height);
+
     public static native void endRenderPass(long ptr, long renderPass);
 }

@@ -27,7 +27,7 @@ impl Default for TextureDescriptor {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgt::TextureDimension::D2,
-            format: wgt::TextureFormat::Rgba8UnormSrgb,
+            format: wgt::TextureFormat::Rgba8Unorm,
             usage: wgt::TextureUsages::TEXTURE_BINDING,
             view_formats: vec![],
         }

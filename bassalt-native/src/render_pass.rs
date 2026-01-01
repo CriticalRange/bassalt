@@ -96,7 +96,9 @@ pub struct RenderPassState {
     // Render pass configuration
     color_view: Option<id::TextureViewId>,
     depth_view: Option<id::TextureViewId>,
+    should_clear_color: bool,
     clear_color: wgt::Color,
+    should_clear_depth: bool,
     clear_depth: f32,
     clear_stencil: u32,
 
@@ -117,7 +119,9 @@ impl RenderPassState {
         queue_id: id::QueueId,
         color_view: Option<id::TextureViewId>,
         depth_view: Option<id::TextureViewId>,
+        should_clear_color: bool,
         clear_color: u32,
+        should_clear_depth: bool,
         clear_depth: f32,
         clear_stencil: u32,
         width: u32,
@@ -136,11 +140,11 @@ impl RenderPassState {
             return Err(BasaltError::Device(format!("Failed to create command encoder: {:?}", e)));
         }
 
-        // Convert clear color from u32 RGBA to wgt::Color
-        let r = ((clear_color >> 24) & 0xFF) as f64 / 255.0;
-        let g = ((clear_color >> 16) & 0xFF) as f64 / 255.0;
-        let b = ((clear_color >> 8) & 0xFF) as f64 / 255.0;
-        let a = (clear_color & 0xFF) as f64 / 255.0;
+        // Convert clear color from u32 ARGB (Minecraft format) to wgt::Color
+        let a = ((clear_color >> 24) & 0xFF) as f64 / 255.0;
+        let r = ((clear_color >> 16) & 0xFF) as f64 / 255.0;
+        let g = ((clear_color >> 8) & 0xFF) as f64 / 255.0;
+        let b = (clear_color & 0xFF) as f64 / 255.0;
 
         Ok(Self {
             context,
@@ -149,7 +153,9 @@ impl RenderPassState {
             command_encoder_id,
             color_view,
             depth_view,
+            should_clear_color,
             clear_color: wgt::Color { r, g, b, a },
+            should_clear_depth,
             clear_depth,
             clear_stencil,
             viewport_width: width,
@@ -349,38 +355,48 @@ impl RenderPassState {
         let global = context.inner();
 
         // Build render pass descriptor with color and depth attachments
+        // Use Clear or Load based on should_clear flags
         let mut color_attachments = Vec::new();
         if let Some(view) = self.color_view {
+            let load_op = if self.should_clear_color {
+                log::info!("Color attachment: CLEAR with {:?}", self.clear_color);
+                wgpu_core::command::LoadOp::Clear(self.clear_color)
+            } else {
+                log::info!("Color attachment: LOAD (preserving previous content)");
+                wgpu_core::command::LoadOp::Load
+            };
             color_attachments.push(Some(wgpu_core::command::RenderPassColorAttachment {
                 view,
                 resolve_target: None,
-                load_op: wgpu_core::command::LoadOp::Clear(self.clear_color),
+                load_op,
                 store_op: wgpu_core::command::StoreOp::Store,
                 depth_slice: None,
             }));
         }
 
-        // NOTE: Depth attachment DISABLED to match pipelines (which all have depth_stencil: None)
-        // When pipelines are created without depth_stencil, render pass must also not have depth attachment
-        // Otherwise we get IncompatibleDepthStencilAttachment { expected: Some(Depth32Float), actual: None }
-        // To enable depth: re-enable depth in pipeline creation (lib.rs) and uncomment this
-        let depth_stencil_attachment: Option<wgpu_core::command::RenderPassDepthStencilAttachment> = None;
-        // Original depth attachment code for future use:
-        // let depth_stencil_attachment = self.depth_view.map(|view| {
-        //     wgpu_core::command::RenderPassDepthStencilAttachment {
-        //         view,
-        //         depth: wgpu_core::command::PassChannel {
-        //             load_op: Some(wgpu_core::command::LoadOp::Clear(Some(self.clear_depth))),
-        //             store_op: Some(wgpu_core::command::StoreOp::Store),
-        //             read_only: false,
-        //         },
-        //         stencil: wgpu_core::command::PassChannel {
-        //             load_op: Some(wgpu_core::command::LoadOp::Clear(Some(self.clear_stencil))),
-        //             store_op: Some(wgpu_core::command::StoreOp::Store),
-        //             read_only: false,
-        //         },
-        //     }
-        // });
+        // Depth attachment - use Clear or Load based on should_clear_depth
+        let depth_stencil_attachment = self.depth_view.map(|view| {
+            let depth_load_op = if self.should_clear_depth {
+                log::info!("Depth attachment: CLEAR with {}", self.clear_depth);
+                wgpu_core::command::LoadOp::Clear(Some(self.clear_depth))
+            } else {
+                log::info!("Depth attachment: LOAD (preserving previous content)");
+                wgpu_core::command::LoadOp::Load
+            };
+            wgpu_core::command::RenderPassDepthStencilAttachment {
+                view,
+                depth: wgpu_core::command::PassChannel {
+                    load_op: Some(depth_load_op),
+                    store_op: Some(wgpu_core::command::StoreOp::Store),
+                    read_only: false,
+                },
+                stencil: wgpu_core::command::PassChannel {
+                    load_op: Some(wgpu_core::command::LoadOp::Clear(Some(self.clear_stencil))),
+                    store_op: Some(wgpu_core::command::StoreOp::Store),
+                    read_only: false,
+                },
+            }
+        });
 
         let desc = wgpu_core::command::RenderPassDescriptor {
             label: Some(Cow::Borrowed("Basalt Render Pass")),

@@ -32,6 +32,7 @@ pub struct TextureInfo {
     pub id: id::TextureId,
     pub array_layers: u32,
     pub dimension: wgpu_types::TextureDimension,
+    pub format: wgpu_types::TextureFormat,
 }
 
 /// Type of binding expected at a slot
@@ -149,10 +150,12 @@ impl ResourceHandleStore {
         texture_id: id::TextureId,
         array_layers: u32,
         dimension: wgpu_types::TextureDimension,
+        format: wgpu_types::TextureFormat,
     ) -> u64 {
         let handle = self.next();
-        let info = TextureInfo { id: texture_id, array_layers, dimension };
+        let info = TextureInfo { id: texture_id, array_layers, dimension, format };
         self.textures.write().insert(handle, info);
+        log::info!("Stored texture handle {} with format {:?}", handle, format);
         handle
     }
 
