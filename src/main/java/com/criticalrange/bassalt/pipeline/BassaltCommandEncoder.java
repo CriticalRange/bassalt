@@ -86,25 +86,14 @@ public class BassaltCommandEncoder implements CommandEncoder {
         int width = 854;  // Default fallback
         int height = 480; // Default fallback
 
-        // Debug: log what types we're getting
-        System.out.println("[Bassalt] createRenderPass: colorTexture=" + 
-            (colorTexture != null ? colorTexture.getClass().getName() : "null") +
-            ", depthTexture=" + (depthTexture != null ? depthTexture.getClass().getName() : "null"));
-
         if (colorTexture instanceof com.criticalrange.bassalt.texture.BassaltTextureView) {
             colorPtr = ((com.criticalrange.bassalt.texture.BassaltTextureView) colorTexture).getNativePtr();
             // Get actual dimensions from the texture
             width = colorTexture.texture().getWidth(0);
             height = colorTexture.texture().getHeight(0);
-            System.out.println("[Bassalt] createRenderPass: Using BassaltTextureView, colorPtr=" + colorPtr + ", " + width + "x" + height);
-        } else if (colorTexture != null) {
-            System.err.println("[Bassalt] WARNING: colorTexture is NOT a BassaltTextureView! Type: " + colorTexture.getClass().getName());
         }
         if (depthTexture instanceof com.criticalrange.bassalt.texture.BassaltTextureView) {
             depthPtr = ((com.criticalrange.bassalt.texture.BassaltTextureView) depthTexture).getNativePtr();
-            System.out.println("[Bassalt] createRenderPass: depthPtr=" + depthPtr);
-        } else if (depthTexture != null) {
-            System.err.println("[Bassalt] WARNING: depthTexture is NOT a BassaltTextureView! Type: " + depthTexture.getClass().getName());
         }
 
         boolean shouldClearColor = clearColor.isPresent();
@@ -327,7 +316,11 @@ public class BassaltCommandEncoder implements CommandEncoder {
     }
 
     public void timerQueryEnd(GpuQuery query) {
-        // TODO: end timer query
+        if (query instanceof BassaltQuery bassaltQuery) {
+            // Finalize the timestamp query
+            // The query will be resolved when getValue() is called
+            bassaltQuery.end();
+        }
     }
 
     @Override

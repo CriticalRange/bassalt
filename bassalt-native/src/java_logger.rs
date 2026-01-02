@@ -1,7 +1,8 @@
 use log::{Level, LevelFilter, Log, Metadata, Record};
-use jni::{JNIEnv, objects::{JClass, JStaticMethodID, JValue}, sys::{jint, jlong}, signature::{Primitive, ReturnType}, JavaVM};
+use jni::{JNIEnv, objects::{JClass, JStaticMethodID, JValue, JObjectArray, JString}, sys::{jint, jlong}, signature::{Primitive, ReturnType}, JavaVM};
 use std::sync::Mutex;
 use once_cell::sync::{Lazy, OnceCell};
+use std::sync::Arc;
 
 /// Cached JNI method and class information for zero-copy logging
 struct CachedLoggerInfo {
@@ -20,6 +21,19 @@ unsafe impl Sync for CachedLoggerInfo {}
 static CACHED_LOGGER: OnceCell<CachedLoggerInfo> = OnceCell::new();
 
 static JAVA_VM: Lazy<Mutex<Option<JavaVM>>> = Lazy::new(|| Mutex::new(None));
+
+/// Maximum number of debug messages to store
+const MAX_DEBUG_MESSAGES: usize = 100;
+
+/// A single debug message
+#[derive(Clone)]
+struct DebugMessage {
+    level: String,
+    message: String,
+}
+
+/// Thread-safe message buffer for getLastDebugMessages()
+static DEBUG_MESSAGES: Lazy<Arc<Mutex<Vec<DebugMessage>>>> = Lazy::new(|| Arc::new(Mutex::new(Vec::new())));
 
 /// Store the JavaVM for logging use
 pub fn set_java_vm(vm: JavaVM) {
@@ -88,6 +102,22 @@ impl Log for JavaLogger {
 
         // Format the message to a String (this is unfortunately necessary for log formatting)
         let message = format!("{}", record.args());
+
+        // Store message in debug buffer for getLastDebugMessages()
+        // Only store warnings and errors
+        if record.level() >= Level::Warn {
+            if let Ok(mut msgs) = DEBUG_MESSAGES.lock() {
+                let level_str = format!("{:?}", record.level());
+                msgs.push(DebugMessage {
+                    level: level_str,
+                    message: message.clone(),
+                });
+                // Keep only the most recent MAX_DEBUG_MESSAGES
+                if msgs.len() > MAX_DEBUG_MESSAGES {
+                    msgs.remove(0);
+                }
+            }
+        }
 
         // Try to log through Java using optimized paths
         if let Ok(java_vm_guard) = JAVA_VM.lock() {
@@ -224,4 +254,40 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltLogger_init
 
     // Initialize the Java logger
     init_java_logging();
+}
+
+/// JNI function to retrieve stored debug messages
+/// Returns an array of strings in format "[LEVEL] message"
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_getLastDebugMessages<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+) -> JObjectArray<'local> {
+    // Get the messages from the buffer
+    let messages = if let Ok(msgs) = DEBUG_MESSAGES.lock() {
+        msgs.clone()
+    } else {
+        Vec::new()
+    };
+
+    // Create a Java String array
+    let string_class = match env.find_class("java/lang/String") {
+        Ok(cls) => cls,
+        Err(_) => return JObjectArray::default(),
+    };
+
+    let array = match env.new_object_array(messages.len() as jint, &string_class, JString::default()) {
+        Ok(arr) => arr,
+        Err(_) => return JObjectArray::default(),
+    };
+
+    // Fill the array with formatted messages
+    for (i, msg) in messages.iter().enumerate() {
+        let formatted = format!("[{}] {}", msg.level, msg.message);
+        if let Ok(jstr) = env.new_string(&formatted) {
+            let _ = env.set_object_array_element(&array, i as jint, jstr);
+        }
+    }
+
+    array
 }

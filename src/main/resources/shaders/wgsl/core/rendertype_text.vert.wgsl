@@ -1,10 +1,6 @@
 // Text vertex shader (rendertype_text)
-// Simplified layout - matches fragment shader
 //
-// Group layout:
-// Group 0: Textures (font texture)
-// Group 1: DynamicTransforms
-// Group 2: Projection
+// All bindings in group 0 to match Bassalt's single bind group approach
 
 struct DynamicTransforms {
     ModelViewMat: mat4x4<f32>,
@@ -18,15 +14,11 @@ struct Projection {
     ProjMat: mat4x4<f32>,
 }
 
-// Group 0: Textures
+// Group 0 bindings
 @group(0) @binding(0) var Sampler0: texture_2d<f32>;
 @group(0) @binding(1) var Sampler0Sampler: sampler;
-
-// Group 1: DynamicTransforms
-@group(1) @binding(0) var<uniform> transforms: DynamicTransforms;
-
-// Group 2: Projection
-@group(2) @binding(0) var<uniform> projection: Projection;
+@group(0) @binding(4) var<uniform> transforms: DynamicTransforms;
+@group(0) @binding(5) var<uniform> projection: Projection;
 
 // Text vertex format (position, color, uv0)
 struct VertexInput {
@@ -44,10 +36,10 @@ struct VertexOutput {
 @vertex
 fn main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    
+
     out.position = projection.ProjMat * transforms.ModelViewMat * vec4<f32>(in.position, 1.0);
     out.vertex_color = in.color;
     out.tex_coord = in.uv0;
-    
+
     return out;
 }

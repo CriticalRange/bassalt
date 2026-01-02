@@ -1,7 +1,8 @@
 // Position-Texture-Color fragment shader
 // Used for GUI textures, Mojang logo, title screen, etc.
+//
+// All bindings in group 0 to match Bassalt's single bind group approach
 
-// DynamicTransforms for ColorModulator
 struct DynamicTransforms {
     ModelViewMat: mat4x4<f32>,
     ColorModulator: vec4<f32>,
@@ -10,12 +11,10 @@ struct DynamicTransforms {
     TextureMat: mat4x4<f32>,
 }
 
-// Group 0: Textures
+// Group 0 bindings
 @group(0) @binding(0) var Sampler0: texture_2d<f32>;
 @group(0) @binding(1) var Sampler0Sampler: sampler;
-
-// Group 1: DynamicTransforms (for ColorModulator)
-@group(1) @binding(0) var<uniform> transforms: DynamicTransforms;
+@group(0) @binding(4) var<uniform> transforms: DynamicTransforms;
 
 struct FragmentInput {
     @location(0) tex_coord: vec2<f32>,

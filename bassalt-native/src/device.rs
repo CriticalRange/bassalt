@@ -26,6 +26,7 @@ struct SwapchainState {
 pub struct BasaltDevice {
     context: Arc<BasaltContext>,
     device_id: id::DeviceId,
+    adapter_id: id::AdapterId,
     queue_id: id::QueueId,
     surface: Option<BasaltSurface>,
     limits: wgt::Limits,
@@ -54,6 +55,7 @@ impl BasaltDevice {
     pub fn new(
         context: Arc<BasaltContext>,
         device_id: id::DeviceId,
+        adapter_id: id::AdapterId,
         queue_id: id::QueueId,
         surface: Option<BasaltSurface>,
         width: u32,
@@ -97,6 +99,7 @@ impl BasaltDevice {
         Ok(Self {
             context,
             device_id,
+            adapter_id,
             queue_id,
             surface,
             limits,
@@ -210,6 +213,11 @@ impl BasaltDevice {
         self.device_id
     }
 
+    /// Get the adapter ID
+    pub fn adapter_id(&self) -> id::AdapterId {
+        self.adapter_id
+    }
+
     /// Get the queue ID
     pub fn queue_id(&self) -> id::QueueId {
         self.queue_id
@@ -289,10 +297,13 @@ impl BasaltDevice {
             return Err(BasaltError::Wgpu(format!("Failed to create depth view: {:?}", e)));
         }
 
+        // Register the view-to-texture mapping
+        self.context.register_texture_view(view_id, texture_id);
+
         // Cache it
         self.depth_texture_cache.lock().insert(key, (texture_id, view_id));
         log::info!("Created and cached depth texture {:?} view {:?} for {}x{}", texture_id, view_id, width, height);
-        
+
         Ok(view_id)
     }
 
@@ -1046,12 +1057,12 @@ impl BasaltDevice {
         let texture_format = self.map_texture_format_public(format)?;
         let texture_usage = self.map_texture_usage(usage);
 
-        // For framebuffer textures (RENDER_ATTACHMENT), also add TEXTURE_BINDING
-        // so they can be sampled in the blit shader for presentation
-        let state = self.swapchain_state.load();
-        let texture_usage = if texture_usage.contains(wgt::TextureUsages::RENDER_ATTACHMENT)
-            && width == state.width && height == state.height {
-            log::info!("Adding TEXTURE_BINDING to framebuffer for blit sampling");
+        // For all render target textures (RENDER_ATTACHMENT), also add TEXTURE_BINDING
+        // so they can be sampled as inputs in subsequent render passes (compositing, post-processing, etc.)
+        // This is essential for multi-pass rendering where intermediate textures need to be sampled.
+        let texture_usage = if texture_usage.contains(wgt::TextureUsages::RENDER_ATTACHMENT) {
+            log::info!("Adding TEXTURE_BINDING to render target {}x{} (format={:?}) for shader sampling",
+                width, height, texture_format);
             texture_usage | wgt::TextureUsages::TEXTURE_BINDING
         } else {
             texture_usage
@@ -1134,20 +1145,10 @@ impl BasaltDevice {
             return Err(BasaltError::Wgpu(format!("{:?}", e)));
         }
 
-        // Detect if this is likely the main framebuffer (matches swapchain size + has RENDER_ATTACHMENT)
-        let state = self.swapchain_state.load();
-        if width == state.width && height == state.height
-            && filtered_usage.contains(wgt::TextureUsages::RENDER_ATTACHMENT) {
-            log::info!("Detected main framebuffer: {:?} ({}x{}) with usage {:?}", texture_id, width, height, filtered_usage);
-            // Lock-free swap
-            let new_state = Arc::new(SwapchainState {
-                current_texture: state.current_texture,
-                main_framebuffer: Some(texture_id),
-                width: state.width,
-                height: state.height,
-            });
-            self.swapchain_state.swap(new_state);
-        }
+        // NOTE: main_framebuffer is now ONLY set by set_main_framebuffer() which is called
+        // from endRenderPass() after a render pass completes. We no longer auto-detect it here
+        // because intermediate textures (same size as swapchain) were incorrectly being marked
+        // as the main framebuffer, causing the actual main framebuffer to be overwritten.
 
         Ok(texture_id)
     }
@@ -1209,11 +1210,14 @@ impl BasaltDevice {
             return Err(BasaltError::Wgpu(format!("{:?}", e)));
         }
 
+        // Register the view-to-texture mapping for reliable lookups
+        self.context.register_texture_view(view_id, texture_id);
+
         log::debug!(
             "Created texture view for texture {:?} with {} layers -> dimension {:?}",
             texture_id, array_layers, view_dimension
         );
-        
+
         Ok((view_id, view_dimension))
     }
 
@@ -2282,12 +2286,49 @@ pub fn create_device_from_window(
         .request_adapter(&adapter_opts, wgt::Backends::all(), None)
         .map_err(|e| BasaltError::device_creation(format!("Failed to find adapter: {:?}", e)))?;
 
+    // Query adapter for available features to enable advanced capabilities
+    let adapter_features = context
+        .inner()
+        .adapter_features(adapter_id);
+
+    // Check if experimental features should be enabled via environment variable
+    // BASALT_EXPERIMENTAL=1 enables experimental features (may have bugs)
+    // wgpu 27.0: Experimental features require explicit unsafe opt-in
+    let experimental_features = if std::env::var("BASALT_EXPERIMENTAL").as_deref() == Ok("1") {
+        log::warn!("BASALT_EXPERIMENTAL=1: Enabling experimental features - may contain bugs!");
+        unsafe { wgt::ExperimentalFeatures::enabled() }
+    } else {
+        wgt::ExperimentalFeatures::disabled()
+    };
+
+    // Build required features with advanced capabilities if available
+    // Start with base features required by Bassalt
+    let mut required_features = wgt::Features::DEPTH_CLIP_CONTROL
+        | wgt::Features::PUSH_CONSTANTS;
+
+    // Enable timestamp queries if available (for GPU profiling)
+    if adapter_features.contains(wgt::Features::TIMESTAMP_QUERY) {
+        log::info!("Adapter supports TIMESTAMP_QUERY - GPU profiling available");
+        required_features |= wgt::Features::TIMESTAMP_QUERY;
+    }
+    if adapter_features.contains(wgt::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS) {
+        required_features |= wgt::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+    }
+    if adapter_features.contains(wgt::Features::TIMESTAMP_QUERY_INSIDE_PASSES) {
+        required_features |= wgt::Features::TIMESTAMP_QUERY_INSIDE_PASSES;
+    }
+
+    // Enable RenderBundles if available (for optimized repeated draws)
+    if adapter_features.contains(wgt::Features::TIMESTAMP_QUERY) {
+        log::info!("Adapter supports RENDER_BUNDLE - optimized repeated draws available");
+        // Note: RENDER_BUNDLE is always available in wgpu 27.0
+    }
+
     // Request device with required features (matching wgpu-mc)
     // wgpu 27.0 requires explicit memory_hints and experimental_features
     let device_desc = wgt::DeviceDescriptor {
         label: Some(Cow::Borrowed("Bassalt Device")),
-        required_features: wgt::Features::DEPTH_CLIP_CONTROL
-            | wgt::Features::PUSH_CONSTANTS,
+        required_features,
         required_limits: wgt::Limits {
             max_push_constant_size: 128,
             max_bind_groups: 8,
@@ -2295,8 +2336,8 @@ pub fn create_device_from_window(
         },
         // wgpu 27.0: Explicit memory hints for better allocation strategy
         memory_hints: wgt::MemoryHints::Performance,
-        // wgpu 27.0: Explicitly disable experimental features for stability
-        experimental_features: wgt::ExperimentalFeatures::disabled(),
+        // wgpu 27.0: Experimental features controlled by BASALT_EXPERIMENTAL env var
+        experimental_features,
         // wgpu 27.0: Explicit trace path (None = Off)
         trace: wgt::Trace::Off,
     };
@@ -2377,5 +2418,5 @@ pub fn create_device_from_window(
 
     bassalt_surface.configure(device_id, surface_config)?;
 
-    BasaltDevice::new(context, device_id, queue_id, Some(bassalt_surface), _width, _height, surface_format)
+    BasaltDevice::new(context, device_id, adapter_id, queue_id, Some(bassalt_surface), _width, _height, surface_format)
 }

@@ -101,7 +101,7 @@ fn minecraft_sample_lightmap(uv: vec2<f32>) -> vec4<f32> {
 fn main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
 
-    let pos = in.position + (chunk_section.ChunkPosition - vec3<f32>(globals.CameraBlockPos)) + globals.CameraOffset;
+    let pos = in.position + vec3<f32>(chunk_section.ChunkPosition - globals.CameraBlockPos) + globals.CameraOffset;
     out.position = projection.ProjMat * transforms.ModelViewMat * vec4<f32>(pos, 1.0);
 
     out.spherical_dist = fog_spherical_distance(pos);

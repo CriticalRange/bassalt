@@ -1,5 +1,7 @@
 // Panorama vertex shader - cubemap rendering
 // Matches MC's panorama.vsh
+//
+// All bindings in group 0 to match Bassalt's single bind group approach
 
 struct DynamicTransforms {
     ModelViewMat: mat4x4<f32>,
@@ -13,8 +15,9 @@ struct Projection {
     ProjMat: mat4x4<f32>,
 }
 
-@group(1) @binding(0) var<uniform> transforms: DynamicTransforms;
-@group(2) @binding(0) var<uniform> projection: Projection;
+// Group 0 bindings
+@group(0) @binding(4) var<uniform> transforms: DynamicTransforms;
+@group(0) @binding(5) var<uniform> projection: Projection;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,

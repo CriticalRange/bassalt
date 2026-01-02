@@ -1,10 +1,16 @@
 // Text intensity fragment shader
+//
+// All bindings in group 0 to match Bassalt's single bind group approach
+
+// Group 0 bindings
 @group(0) @binding(0) var font_texture: texture_2d<f32>;
 @group(0) @binding(1) var font_sampler: sampler;
+
 struct FragmentInput {
     @location(0) vertex_color: vec4<f32>,
     @location(1) tex_coord: vec2<f32>,
 }
+
 @fragment
 fn main(in: FragmentInput) -> @location(0) vec4<f32> {
     let tex_color = textureSample(font_texture, font_sampler, in.tex_coord);

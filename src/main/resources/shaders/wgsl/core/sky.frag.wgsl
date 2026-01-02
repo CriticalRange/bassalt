@@ -1,4 +1,6 @@
 // Sky fragment shader
+//
+// All bindings in group 0 to match Bassalt's single bind group approach
 
 struct DynamicUniforms {
     model_view: mat4x4<f32>,
@@ -8,7 +10,8 @@ struct DynamicUniforms {
     texture_mat: mat4x4<f32>,
 }
 
-@group(1) @binding(0) var<uniform> uniforms: DynamicUniforms;
+// Group 0 bindings
+@group(0) @binding(4) var<uniform> uniforms: DynamicUniforms;
 
 @fragment
 fn main() -> @location(0) vec4<f32> {
