@@ -95,6 +95,40 @@ task copyNativeLibrary(type: Copy, dependsOn: buildNative) {
 	include libraryName
 }
 
+// Enhanced clean task - also cleans the native Rust project and native libraries
+task cleanNative(type: Exec) {
+	workingDir file("bassalt-native")
+	commandLine "cargo", "clean"
+}
+
+task cleanNativeLibraries {
+	doLast {
+		// Delete native libraries from resources directory
+		def nativeDir = file("src/main/resources/native")
+		if (nativeDir.exists()) {
+			delete nativeDir
+			logger.lifecycle("Deleted native library directory: ${nativeDir}")
+		}
+
+		// Delete native libraries from build output
+		def metaInfDir = file("build/classes/java/main/META-INF/native")
+		if (metaInfDir.exists()) {
+			delete metaInfDir
+			logger.lifecycle("Deleted META-INF native directory: ${metaInfDir}")
+		}
+
+		// Delete any native library files in root (might be created during development)
+		fileTree(dir: projectDir).include("*.so").include("*.dll").include("*.dylib").each { f ->
+			delete f
+			logger.lifecycle("Deleted native library: ${f}")
+		}
+	}
+}
+
+// Make clean task also clean native artifacts
+clean.dependsOn cleanNative
+clean.dependsOn cleanNativeLibraries
+
 // Build native library before building JAR
 tasks.named('jar') {
 	dependsOn copyNativeLibrary
