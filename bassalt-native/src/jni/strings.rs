@@ -1,6 +1,5 @@
 use jni::JNIEnv;
-use jni::objects::{JString, JValueGen};
-use std::ffi::CStr;
+use jni::objects::JString;
 
 /// Get a Rust String from a JString
 ///

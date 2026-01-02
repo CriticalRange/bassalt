@@ -1,22 +1,26 @@
 // Position-Texture fragment shader
+//
+// All bindings in group 0 to match Bassalt's single bind group approach
 
-struct DynamicUniforms {
-    model_view: mat4x4<f32>,
-    color_mod: vec4<f32>,
-    model_offset: vec3<f32>,
+struct DynamicTransforms {
+    ModelViewMat: mat4x4<f32>,
+    ColorModulator: vec4<f32>,
+    ModelOffset: vec3<f32>,
     _pad0: f32,
-    texture_mat: mat4x4<f32>,
+    TextureMat: mat4x4<f32>,
 }
 
+// Group 0 bindings
 @group(0) @binding(0) var Sampler0: texture_2d<f32>;
 @group(0) @binding(1) var Sampler0Sampler: sampler;
-@group(1) @binding(0) var<uniform> uniforms: DynamicUniforms;
+@group(0) @binding(4) var<uniform> transforms: DynamicTransforms;
 
 @fragment
 fn main(@location(0) tex_coord: vec2<f32>) -> @location(0) vec4<f32> {
     let color = textureSample(Sampler0, Sampler0Sampler, tex_coord);
-    if (color.a < 0.01) {
+    // GLSL uses: if (color.a == 0.0) discard;
+    if (color.a == 0.0) {
         discard;
     }
-    return color * uniforms.color_mod;
+    return color * transforms.ColorModulator;
 }

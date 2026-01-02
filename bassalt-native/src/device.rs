@@ -4,14 +4,23 @@ use std::borrow::Cow;
 use std::sync::Arc;
 use wgpu_core::id;
 use wgpu_core::pipeline;
-use wgpu_core::command;
 use wgpu_types as wgt;
 
 use crate::context::BasaltContext;
 use crate::surface::BasaltSurface;
+use crate::pipeline_registry::PipelineCache;
 use crate::pipeline::RenderPipelineDescriptor;
 use crate::error::{BasaltError, Result};
-use crate::bind_group_layouts::{BindGroupLayouts, BindGroupLayoutType};
+use crate::bind_group_layouts::{BindGroupLayouts, SharedLayoutCache};
+
+/// Current swapchain state (for lock-free updates)
+#[derive(Debug, Clone)]
+struct SwapchainState {
+    current_texture: Option<id::TextureId>,
+    main_framebuffer: Option<id::TextureId>,
+    width: u32,
+    height: u32,
+}
 
 /// Main device wrapper
 pub struct BasaltDevice {
@@ -21,12 +30,8 @@ pub struct BasaltDevice {
     surface: Option<BasaltSurface>,
     limits: wgt::Limits,
     info: String,
-    // Cached swapchain state
-    current_swapchain_texture: parking_lot::Mutex<Option<id::TextureId>>,
-    // Track the main framebuffer that should be presented
-    main_framebuffer: parking_lot::Mutex<Option<id::TextureId>>,
-    swapchain_width: u32,
-    swapchain_height: u32,
+    // Lock-free swapchain state (wgpu-mc pattern)
+    swapchain_state: arc_swap::ArcSwap<SwapchainState>,
     swapchain_format: wgt::TextureFormat,
     // Cached blit pipeline for format conversion
     blit_bind_group_layout: parking_lot::Mutex<Option<id::BindGroupLayoutId>>,
@@ -38,6 +43,10 @@ pub struct BasaltDevice {
     pub bind_group_layouts: BindGroupLayouts,
     // Depth texture cache by dimensions (width, height) -> (texture_id, view_id)
     depth_texture_cache: parking_lot::Mutex<std::collections::HashMap<(u32, u32), (id::TextureId, id::TextureViewId)>>,
+    // Pipeline cache for fast shader compilation
+    pub pipeline_cache: Arc<PipelineCache>,
+    // Shared layout cache for deduplicating bind group layouts
+    pub layout_cache: Arc<SharedLayoutCache>,
 }
 
 impl BasaltDevice {
@@ -67,7 +76,23 @@ impl BasaltDevice {
         // Create pre-defined bind group layouts (wgpu-mc style)
         let bind_group_layouts = BindGroupLayouts::new(&context, device_id);
 
+        // Create pipeline cache for fast shader compilation
+        let pipeline_cache = Arc::new(PipelineCache::new());
+
+        // Create layout cache for deduplicating bind group layouts
+        let layout_cache = Arc::new(SharedLayoutCache::new());
+
         log::info!("Created shared pipeline layout for Minecraft rendering");
+        log::info!("Initialized pipeline cache for shader compilation");
+        log::info!("Initialized layout cache for bind group deduplication");
+
+        // Initial swapchain state
+        let initial_state = SwapchainState {
+            current_texture: None,
+            main_framebuffer: None,
+            width,
+            height,
+        };
 
         Ok(Self {
             context,
@@ -76,10 +101,7 @@ impl BasaltDevice {
             surface,
             limits,
             info,
-            current_swapchain_texture: parking_lot::Mutex::new(None),
-            main_framebuffer: parking_lot::Mutex::new(None),
-            swapchain_width: width,
-            swapchain_height: height,
+            swapchain_state: arc_swap::ArcSwap::from(Arc::new(initial_state)),
             swapchain_format,
             blit_bind_group_layout: parking_lot::Mutex::new(None),
             blit_pipeline: parking_lot::Mutex::new(None),
@@ -87,6 +109,8 @@ impl BasaltDevice {
             shared_pipeline_layout,
             bind_group_layouts,
             depth_texture_cache: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            pipeline_cache,
+            layout_cache,
         })
     }
 
@@ -150,7 +174,7 @@ impl BasaltDevice {
         let (bgl_id, bgl_error) = global.device_create_bind_group_layout(device_id, &bgl_desc, None);
 
         if let Some(e) = bgl_error {
-            return Err(BasaltError::Device(format!(
+            return Err(BasaltError::device_creation(format!(
                 "Failed to create shared bind group layout: {:?}",
                 e
             )));
@@ -172,7 +196,7 @@ impl BasaltDevice {
         let (pl_id, pl_error) = global.device_create_pipeline_layout(device_id, &pl_desc, None);
 
         if let Some(e) = pl_error {
-            return Err(BasaltError::Device(format!(
+            return Err(BasaltError::device_creation(format!(
                 "Failed to create shared pipeline layout: {:?}",
                 e
             )));
@@ -274,26 +298,33 @@ impl BasaltDevice {
 
     /// Acquire the swapchain texture for rendering
     pub fn acquire_swapchain_texture(&self) -> Result<id::TextureId> {
-        // Check if we already have one
-        if let Some(texture_id) = *self.current_swapchain_texture.lock() {
+        // Check if we already have one (lock-free read)
+        let state = self.swapchain_state.load();
+        if let Some(texture_id) = state.current_texture {
             log::debug!("Using cached swapchain texture: {:?}", texture_id);
             return Ok(texture_id);
         }
 
         let surface = self.surface.as_ref()
-            .ok_or_else(|| BasaltError::Surface("No surface available".into()))?;
+            .ok_or_else(|| BasaltError::surface("No surface available"))?;
 
         // Get the current swapchain texture
         let output = self.context.inner().surface_get_current_texture(
             surface.id(),
             None,
-        ).map_err(|e| BasaltError::Surface(format!("Failed to acquire swapchain texture: {:?}", e)))?;
+        ).map_err(|e| BasaltError::surface(format!("Failed to acquire swapchain texture: {:?}", e)))?;
 
         let texture_id = output.texture
-            .ok_or_else(|| BasaltError::Surface("Swapchain texture not available".into()))?;
+            .ok_or_else(|| BasaltError::surface("Swapchain texture not available"))?;
 
-        // Cache it
-        *self.current_swapchain_texture.lock() = Some(texture_id);
+        // Update swapchain state (lock-free swap)
+        let new_state = Arc::new(SwapchainState {
+            current_texture: Some(texture_id),
+            main_framebuffer: state.main_framebuffer,
+            width: state.width,
+            height: state.height,
+        });
+        self.swapchain_state.swap(new_state);
 
         log::info!("Acquired swapchain texture: {:?}", texture_id);
         Ok(texture_id)
@@ -301,7 +332,7 @@ impl BasaltDevice {
 
     /// Get the current swapchain texture if available
     pub fn get_swapchain_texture(&self) -> Option<id::TextureId> {
-        *self.current_swapchain_texture.lock()
+        self.swapchain_state.load().current_texture
     }
 
     /// Blit from source texture to swapchain using a render pass
@@ -693,7 +724,8 @@ impl BasaltDevice {
         };
 
         // Get the main framebuffer to blit from (if we have one)
-        if let Some(main_fb) = *self.main_framebuffer.lock() {
+        let state = self.swapchain_state.load();
+        if let Some(main_fb) = state.main_framebuffer {
             log::info!("Blitting main framebuffer {:?} to swapchain {:?}", main_fb, swapchain_texture);
 
             // Blit using a render pass (handles format conversion)
@@ -711,23 +743,39 @@ impl BasaltDevice {
             }
         }
 
+        // macOS pre-present notification for proper frame synchronization
+        // This must be called before present() on macOS for correct timing
+        surface.pre_present_notify();
+
         // Present the surface
-        match self.context.inner().surface_present(surface.id()) {
+        match surface.present(self.queue_id) {
             Ok(status) => {
                 log::info!("Presented frame with status: {:?}", status);
 
-                // Clear the cached texture - it's been presented
-                *self.current_swapchain_texture.lock() = None;
+                // Clear the cached texture - it's been presented (lock-free swap)
+                let new_state = Arc::new(SwapchainState {
+                    current_texture: None,
+                    main_framebuffer: state.main_framebuffer,
+                    width: state.width,
+                    height: state.height,
+                });
+                self.swapchain_state.swap(new_state);
 
                 Ok(())
             }
             Err(e) => {
                 log::error!("Failed to present frame: {:?}", e);
 
-                // Clear the cached texture even on error
-                *self.current_swapchain_texture.lock() = None;
+                // Clear the cached texture even on error (lock-free swap)
+                let new_state = Arc::new(SwapchainState {
+                    current_texture: None,
+                    main_framebuffer: state.main_framebuffer,
+                    width: state.width,
+                    height: state.height,
+                });
+                self.swapchain_state.swap(new_state);
 
-                Err(BasaltError::Surface(format!("Failed to present: {:?}", e)))
+                Err(BasaltError::surface(format!("Failed to present: {:?}", e)))
             }
         }
     }
@@ -842,7 +890,15 @@ impl BasaltDevice {
     /// This should be called when a render pass targets a texture that will be presented
     pub fn set_main_framebuffer(&self, texture_id: id::TextureId) {
         log::info!("Explicitly setting main framebuffer to {:?}", texture_id);
-        *self.main_framebuffer.lock() = Some(texture_id);
+        // Lock-free swap
+        let state = self.swapchain_state.load();
+        let new_state = Arc::new(SwapchainState {
+            current_texture: state.current_texture,
+            main_framebuffer: Some(texture_id),
+            width: state.width,
+            height: state.height,
+        });
+        self.swapchain_state.swap(new_state);
     }
 
     /// Set the main framebuffer from a texture view ID
@@ -888,7 +944,43 @@ impl BasaltDevice {
         self.device_id
     }
 
-    /// Create a buffer
+    /// Poll the device and check device status (wgpu pattern)
+    ///
+    /// This processes any pending GPU operations and returns the device status.
+    /// Based on wgpu's pattern of polling to process async operations.
+    /// Use this to synchronize with the GPU and ensure operations have completed.
+    ///
+    /// # Arguments
+    /// * `wait` - If true, wait until all operations complete. If false, just check status.
+    ///
+    /// # Returns
+    /// * `Ok(true)` - Queue is empty (no pending work)
+    /// * `Ok(false)` - Queue has work
+    /// * `Err(...)` - Poll failed
+    pub fn poll_device(&self, wait: bool) -> Result<bool> {
+        let poll_type = if wait {
+            wgt::PollType::wait_indefinitely()
+        } else {
+            wgt::PollType::Poll
+        };
+
+        match self.context.inner().device_poll(self.device_id, poll_type) {
+            Ok(status) => {
+                if status.is_queue_empty() {
+                    log::debug!("Device poll: queue is empty");
+                } else {
+                    log::debug!("Device poll: queue has work");
+                }
+                Ok(status.is_queue_empty())
+            }
+            Err(e) => {
+                log::error!("Device poll error: {:?}", e);
+                Err(BasaltError::device_creation(format!("Device poll failed: {:?}", e)))
+            }
+        }
+    }
+
+    /// Create a buffer with a descriptive debug label based on usage
     pub fn create_buffer(&self, size: u64, usage: u32) -> Result<id::BufferId> {
         let mut wgpu_usage = self.map_buffer_usage(usage);
 
@@ -904,8 +996,11 @@ impl BasaltDevice {
             );
         }
 
+        // Create a descriptive label based on usage
+        let label = self.buffer_usage_to_label(wgpu_usage, size);
+
         let desc = wgt::BufferDescriptor {
-            label: Some(Cow::Borrowed("Basalt Buffer")),
+            label: Some(Cow::Owned(label)),
             size,
             usage: wgpu_usage,
             mapped_at_creation: false,
@@ -953,8 +1048,9 @@ impl BasaltDevice {
 
         // For framebuffer textures (RENDER_ATTACHMENT), also add TEXTURE_BINDING
         // so they can be sampled in the blit shader for presentation
-        let texture_usage = if texture_usage.contains(wgt::TextureUsages::RENDER_ATTACHMENT) 
-            && width == self.swapchain_width && height == self.swapchain_height {
+        let state = self.swapchain_state.load();
+        let texture_usage = if texture_usage.contains(wgt::TextureUsages::RENDER_ATTACHMENT)
+            && width == state.width && height == state.height {
             log::info!("Adding TEXTURE_BINDING to framebuffer for blit sampling");
             texture_usage | wgt::TextureUsages::TEXTURE_BINDING
         } else {
@@ -1015,8 +1111,11 @@ impl BasaltDevice {
             depth_or_array_layers: depth,
         };
 
+        // Create a descriptive label based on texture usage
+        let label = self.texture_usage_to_label(filtered_usage, width, height, texture_format);
+
         let desc = wgt::TextureDescriptor {
-            label: Some(Cow::Borrowed("Basalt Texture")),
+            label: Some(Cow::Owned(label)),
             size: extent,
             mip_level_count: actual_mip_levels,
             sample_count: 1,
@@ -1036,10 +1135,18 @@ impl BasaltDevice {
         }
 
         // Detect if this is likely the main framebuffer (matches swapchain size + has RENDER_ATTACHMENT)
-        if width == self.swapchain_width && height == self.swapchain_height
+        let state = self.swapchain_state.load();
+        if width == state.width && height == state.height
             && filtered_usage.contains(wgt::TextureUsages::RENDER_ATTACHMENT) {
             log::info!("Detected main framebuffer: {:?} ({}x{}) with usage {:?}", texture_id, width, height, filtered_usage);
-            *self.main_framebuffer.lock() = Some(texture_id);
+            // Lock-free swap
+            let new_state = Arc::new(SwapchainState {
+                current_texture: state.current_texture,
+                main_framebuffer: Some(texture_id),
+                width: state.width,
+                height: state.height,
+            });
+            self.swapchain_state.swap(new_state);
         }
 
         Ok(texture_id)
@@ -1050,7 +1157,7 @@ impl BasaltDevice {
         self.context.inner().texture_drop(texture_id);
     }
 
-    /// Create a texture view, returns (view_id, dimension)
+    /// Create a texture view with descriptive debug label, returns (view_id, dimension)
     /// array_layers is used to determine if this is a D2 or D2Array texture
     pub fn create_texture_view(
         &self,
@@ -1069,9 +1176,18 @@ impl BasaltDevice {
         } else {
             wgt::TextureViewDimension::D2
         };
-        
+
+        // Create a descriptive label based on dimension
+        let dim_name = match view_dimension {
+            wgt::TextureViewDimension::D2 => "D2",
+            wgt::TextureViewDimension::D2Array => "D2Array",
+            wgt::TextureViewDimension::Cube => "Cube",
+            _ => "Unknown",
+        };
+        let label = format!("Bassalt Texture View: {} ({} layers)", dim_name, array_layers);
+
         let desc = wgpu_core::resource::TextureViewDescriptor {
-            label: Some(Cow::Borrowed("Basalt Texture View")),
+            label: Some(Cow::Owned(label)),
             format: None,
             dimension: Some(view_dimension),
             usage: None,
@@ -1519,14 +1635,14 @@ impl BasaltDevice {
     pub fn create_render_pipeline(&self, desc: RenderPipelineDescriptor) -> Result<id::RenderPipelineId> {
         // Parse WGSL shaders
         let vertex_module = self.parse_wgsl(&desc.vertex_shader)?;
-        let fragment_module = if let Some(fs) = &desc.fragment_shader {
+        let _fragment_module = if let Some(fs) = &desc.fragment_shader {
             Some(self.parse_wgsl(fs)?)
         } else {
             None
         };
 
         // Create shader modules
-        let vs_desc = pipeline::ShaderModuleDescriptor {
+        let _vs_desc = pipeline::ShaderModuleDescriptor {
             label: Some(Cow::Borrowed("Vertex Shader")),
             runtime_checks: wgt::ShaderRuntimeChecks::default(),
         };
@@ -1537,7 +1653,11 @@ impl BasaltDevice {
 
         // Simplified - full implementation needs proper shader module creation
         // For now, return a placeholder error
-        Err(BasaltError::ShaderCompilation("Pipeline creation requires full wgpu-core 27 implementation".into()))
+        Err(BasaltError::shader_compilation(
+            "createRenderPipeline",
+            "Pipeline creation requires full wgpu-core 27 implementation",
+            "unknown",
+        ))
     }
 
     /// Begin a render pass - simplified stub
@@ -1670,6 +1790,155 @@ impl BasaltDevice {
         result
     }
 
+    /// Generate a descriptive debug label for a buffer based on its usage
+    fn buffer_usage_to_label(&self, usage: wgt::BufferUsages, size: u64) -> String {
+        let mut type_parts = Vec::new();
+
+        if usage.contains(wgt::BufferUsages::VERTEX) {
+            type_parts.push("Vertex");
+        }
+        if usage.contains(wgt::BufferUsages::INDEX) {
+            type_parts.push("Index");
+        }
+        if usage.contains(wgt::BufferUsages::UNIFORM) {
+            type_parts.push("Uniform");
+        }
+        if usage.contains(wgt::BufferUsages::STORAGE) {
+            type_parts.push("Storage");
+        }
+        if usage.contains(wgt::BufferUsages::COPY_SRC) {
+            type_parts.push("CopySrc");
+        }
+        if usage.contains(wgt::BufferUsages::COPY_DST) {
+            type_parts.push("CopyDst");
+        }
+        if usage.contains(wgt::BufferUsages::INDIRECT) {
+            type_parts.push("Indirect");
+        }
+
+        let type_str = if type_parts.is_empty() {
+            "Unknown".to_string()
+        } else {
+            type_parts.join("+")
+        };
+
+        // Format size nicely (KB, MB)
+        let size_str = if size >= 1024 * 1024 {
+            format!("{:.1}MB", size as f64 / (1024.0 * 1024.0))
+        } else if size >= 1024 {
+            format!("{:.1}KB", size as f64 / 1024.0)
+        } else {
+            format!("{}B", size)
+        };
+
+        // Add alignment info for uniform buffers (wgpu pattern)
+        let extra_info = if usage.contains(wgt::BufferUsages::UNIFORM) && size <= 65536 {
+            let aligned = align_to(size, self.limits.min_uniform_buffer_offset_alignment as u64);
+            if aligned != size {
+                format!(" (aligned: {})", aligned)
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+
+        format!("Bassalt Buffer: {} ({}{})", type_str, size_str, extra_info)
+    }
+
+    /// Generate a descriptive debug label for a texture based on its usage
+    /// Enhanced with wgpu-style pattern matching for better debugging
+    fn texture_usage_to_label(&self, usage: wgt::TextureUsages, width: u32, height: u32, format: wgt::TextureFormat) -> String {
+        let mut type_parts = Vec::new();
+
+        // Categorize by usage type (order matters for readability)
+        if usage.contains(wgt::TextureUsages::TEXTURE_BINDING) {
+            type_parts.push("Texture");
+        }
+        if usage.contains(wgt::TextureUsages::RENDER_ATTACHMENT) {
+            type_parts.push("RenderTarget");
+        }
+        if usage.contains(wgt::TextureUsages::STORAGE_BINDING) {
+            type_parts.push("Storage");
+        }
+        if usage.contains(wgt::TextureUsages::COPY_SRC) {
+            type_parts.push("CopySrc");
+        }
+        if usage.contains(wgt::TextureUsages::COPY_DST) {
+            type_parts.push("CopyDst");
+        }
+
+        let type_str = if type_parts.is_empty() {
+            "Unknown".to_string()
+        } else {
+            type_parts.join("+")
+        };
+
+        // Calculate estimated memory size based on format
+        // Uses common format sizes for estimation (wgpu pattern)
+        let bytes_per_pixel = match format {
+            // 4-byte formats (RGBA, BGRA, etc.)
+            wgt::TextureFormat::Rgba8Unorm | wgt::TextureFormat::Rgba8UnormSrgb |
+            wgt::TextureFormat::Rgba8Snorm | wgt::TextureFormat::Rgba8Uint |
+            wgt::TextureFormat::Rgba8Sint | wgt::TextureFormat::Bgra8Unorm |
+            wgt::TextureFormat::Bgra8UnormSrgb | wgt::TextureFormat::Rgb10a2Unorm |
+            wgt::TextureFormat::Rg11b10Ufloat | wgt::TextureFormat::Rgba32Float |
+            wgt::TextureFormat::Rgba32Uint | wgt::TextureFormat::Rgba32Sint => 4,
+
+            // 2-byte formats (RG, Depth16, etc.)
+            wgt::TextureFormat::Rg8Unorm | wgt::TextureFormat::Rg8Snorm |
+            wgt::TextureFormat::Rg8Uint | wgt::TextureFormat::Rg8Sint |
+            wgt::TextureFormat::Rg16Unorm | wgt::TextureFormat::Rg16Snorm |
+            wgt::TextureFormat::Rg16Uint | wgt::TextureFormat::Rg16Sint |
+            wgt::TextureFormat::Rg16Float | wgt::TextureFormat::Rg32Float |
+            wgt::TextureFormat::Rg32Uint | wgt::TextureFormat::Rg32Sint |
+            wgt::TextureFormat::Depth16Unorm => 2,
+
+            // 1-byte formats (R, etc.)
+            wgt::TextureFormat::R8Unorm | wgt::TextureFormat::R8Snorm |
+            wgt::TextureFormat::R8Uint | wgt::TextureFormat::R8Sint => 1,
+
+            // Larger formats (8 bytes)
+            wgt::TextureFormat::Rgba16Unorm | wgt::TextureFormat::Rgba16Snorm |
+            wgt::TextureFormat::Rgba16Uint | wgt::TextureFormat::Rgba16Sint |
+            wgt::TextureFormat::Rgba16Float => 8,
+
+            // Depth formats (4 bytes is typical)
+            wgt::TextureFormat::Depth24Plus | wgt::TextureFormat::Depth24PlusStencil8 |
+            wgt::TextureFormat::Depth32Float | wgt::TextureFormat::Depth32FloatStencil8 => 4,
+
+            // Default to 4 bytes
+            _ => 4,
+        };
+        let estimated_bytes = (width as u64 * height as u64 * bytes_per_pixel) as u64;
+
+        // Format size nicely (KB, MB)
+        let size_str = if estimated_bytes >= 1024 * 1024 {
+            format!("{:.1}MB", estimated_bytes as f64 / (1024.0 * 1024.0))
+        } else if estimated_bytes >= 1024 {
+            format!("{:.1}KB", estimated_bytes as f64 / 1024.0)
+        } else {
+            format!("{}B", estimated_bytes)
+        };
+
+        let label = format!("Bassalt Texture: {} {}x{} ({:?}) ~{}",
+            type_str, width, height, format, size_str);
+
+        // Log detailed usage breakdown for debugging
+        log::debug!("Texture label breakdown: {}", label);
+        if usage.contains(wgt::TextureUsages::RENDER_ATTACHMENT) {
+            log::debug!("  → This texture can be used as a render target (framebuffer/output)");
+        }
+        if usage.contains(wgt::TextureUsages::TEXTURE_BINDING) {
+            log::debug!("  → This texture can be sampled in shaders (input texture)");
+        }
+        if usage.contains(wgt::TextureUsages::STORAGE_BINDING) {
+            log::debug!("  → This texture can be used as a storage texture (read/write in shaders)");
+        }
+
+        label
+    }
+
     pub fn map_texture_format_public(&self, format: u32) -> Result<wgt::TextureFormat> {
         const RGBA8: u32 = 0;
         const BGRA8: u32 = 1;
@@ -1693,7 +1962,7 @@ impl BasaltDevice {
             DEPTH24 => wgt::TextureFormat::Depth24Plus,
             DEPTH32F => wgt::TextureFormat::Depth32Float,
             DEPTH24_STENCIL8 => wgt::TextureFormat::Depth24PlusStencil8,
-            _ => return Err(BasaltError::InvalidParameter(format!("Unknown texture format: {}", format))),
+            _ => return Err(BasaltError::invalid_parameter("format", format!("Unknown texture format: {}", format))),
         })
     }
 
@@ -1703,7 +1972,7 @@ impl BasaltDevice {
             1 => wgt::AddressMode::MirrorRepeat,
             2 => wgt::AddressMode::ClampToEdge,
             3 => wgt::AddressMode::ClampToBorder,
-            _ => return Err(BasaltError::InvalidParameter(format!("Unknown address mode: {}", mode))),
+            _ => return Err(BasaltError::invalid_parameter("mode", format!("Unknown address mode: {}", mode))),
         })
     }
 
@@ -1711,7 +1980,7 @@ impl BasaltDevice {
         Ok(match mode {
             0 => wgt::FilterMode::Nearest,
             1 => wgt::FilterMode::Linear,
-            _ => return Err(BasaltError::InvalidParameter(format!("Unknown filter mode: {}", mode))),
+            _ => return Err(BasaltError::invalid_parameter("mode", format!("Unknown filter mode: {}", mode))),
         })
     }
 
@@ -1719,7 +1988,7 @@ impl BasaltDevice {
         Ok(match mode {
             0 => wgt::FilterMode::Nearest,
             1 => wgt::FilterMode::Linear,
-            _ => return Err(BasaltError::InvalidParameter(format!("Unknown mipmap filter: {}", mode))),
+            _ => return Err(BasaltError::invalid_parameter("mode", format!("Unknown mipmap filter: {}", mode))),
         })
     }
 
@@ -1735,7 +2004,7 @@ impl BasaltDevice {
             7 => wgt::BlendFactor::OneMinusSrcAlpha,
             8 => wgt::BlendFactor::DstAlpha,
             9 => wgt::BlendFactor::OneMinusDstAlpha,
-            _ => return Err(BasaltError::InvalidParameter(format!("Unknown blend factor: {}", factor))),
+            _ => return Err(BasaltError::invalid_parameter("factor", format!("Unknown blend factor: {}", factor))),
         })
     }
 
@@ -1749,7 +2018,7 @@ impl BasaltDevice {
             5 => wgt::CompareFunction::NotEqual,
             6 => wgt::CompareFunction::GreaterEqual,
             7 => wgt::CompareFunction::Always,
-            _ => return Err(BasaltError::InvalidParameter(format!("Unknown compare function: {}", func))),
+            _ => return Err(BasaltError::invalid_parameter("function", format!("Unknown compare function: {}", func))),
         })
     }
 
@@ -1760,13 +2029,68 @@ impl BasaltDevice {
             2 => wgt::PrimitiveTopology::LineStrip,
             3 => wgt::PrimitiveTopology::TriangleList,
             4 => wgt::PrimitiveTopology::TriangleStrip,
-            _ => return Err(BasaltError::InvalidParameter(format!("Unknown topology: {}", topology))),
+            _ => return Err(BasaltError::invalid_parameter("topology", format!("Unknown topology: {}", topology))),
         })
     }
 
     fn parse_wgsl(&self, wgsl: &str) -> Result<naga::Module> {
-        naga::front::wgsl::parse_str(&wgsl).map_err(|e| BasaltError::ShaderCompilation(format!("WGSL parse error: {:?}", e)))
+        naga::front::wgsl::parse_str(&wgsl).map_err(|e| {
+            BasaltError::ShaderParse {
+                error: e.to_string(),
+                line: None,
+                column: None,
+            }
+        })
     }
+}
+
+/// Build view_formats for surface configuration (wgpu 27.0 best practice)
+///
+/// wgpu 27.0 recommends including both the base format and its sRGB variant
+/// in view_formats for better compatibility. This allows render passes to
+/// use either format for the same swapchain texture.
+fn build_view_formats(base_format: &wgt::TextureFormat, supported_formats: &[wgt::TextureFormat]) -> Vec<wgt::TextureFormat> {
+    let mut view_formats = Vec::with_capacity(2);
+
+    // Always include the base format itself
+    view_formats.push(*base_format);
+
+    // Add sRGB variant if supported
+    let srgb_variant = match base_format {
+        wgt::TextureFormat::Rgba8Unorm => Some(wgt::TextureFormat::Rgba8UnormSrgb),
+        wgt::TextureFormat::Bgra8Unorm => Some(wgt::TextureFormat::Bgra8UnormSrgb),
+        wgt::TextureFormat::Rgba8UnormSrgb => Some(wgt::TextureFormat::Rgba8Unorm),
+        wgt::TextureFormat::Bgra8UnormSrgb => Some(wgt::TextureFormat::Bgra8Unorm),
+        _ => None,
+    };
+
+    if let Some(variant) = srgb_variant {
+        if supported_formats.contains(&variant) {
+            view_formats.push(variant);
+        }
+    }
+
+    view_formats
+}
+
+/// Align a value to a given alignment (wgpu utility pattern)
+///
+/// This is used for calculating proper buffer offsets and sizes that meet
+/// GPU alignment requirements. Based on wgpu's `align_to` utility.
+///
+/// # Arguments
+/// * `value` - The value to align
+/// * `alignment` - The alignment requirement (must be power of 2)
+///
+/// # Examples
+/// ```
+/// assert_eq!(align_to(100, 256), 256);
+/// assert_eq!(align_to(512, 256), 512);
+/// assert_eq!(align_to(257, 256), 512);
+/// ```
+fn align_to(value: u64, alignment: u64) -> u64 {
+    debug_assert!(alignment.is_power_of_two(), "Alignment must be a power of 2");
+    (value + alignment - 1) & !(alignment - 1)
 }
 
 /// Helper function to create a device from a GLFW window handle
@@ -1790,7 +2114,7 @@ pub fn create_device_from_window(
             let window_handle = XlibWindowHandle::new(window_ptr);
             let display_handle = XlibDisplayHandle::new(
                 Some(NonNull::new(display_ptr as *mut _)
-                    .ok_or_else(|| BasaltError::Surface("Invalid X11 display handle".into()))?),
+                    .ok_or_else(|| BasaltError::surface("Invalid X11 display handle"))?),
                 0  // screen number - 0 is the default screen
             );
 
@@ -1798,8 +2122,8 @@ pub fn create_device_from_window(
             (RawWindowHandle::Xlib(window_handle), RawDisplayHandle::Xlib(display_handle))
         } else {
             // No display handle available - cannot create surface
-            return Err(BasaltError::Surface(
-                "No valid display handle - GLFW must provide either X11 or Wayland handles".into()
+            return Err(BasaltError::surface(
+                "No valid display handle - GLFW must provide either X11 or Wayland handles"
             ));
         }
     };
@@ -1881,7 +2205,7 @@ pub fn create_device_from_window(
                 )
             };
             
-            surface_result.map_err(|e| BasaltError::Surface(format!("Failed to create surface: {:?}", e)))?
+            surface_result.map_err(|e| BasaltError::surface(format!("Failed to create surface: {:?}", e)))?
         } else {
             // On a background thread, dispatch to main
             log::info!("macOS: On background thread, dispatching to main queue");
@@ -1931,7 +2255,7 @@ pub fn create_device_from_window(
                 .unwrap()
                 .take()
                 .unwrap()
-                .map_err(|e| BasaltError::Surface(format!("Failed to create surface: {:?}", e)))?;
+                .map_err(|e| BasaltError::surface(format!("Failed to create surface: {:?}", e)))?;
             surface_id
         }
     };
@@ -1944,7 +2268,7 @@ pub fn create_device_from_window(
             raw_window_handle,
             None,
         )
-    }.map_err(|e| BasaltError::Surface(format!("Failed to create surface: {:?}", e)))?;
+    }.map_err(|e| BasaltError::surface(format!("Failed to create surface: {:?}", e)))?;
 
     // Request adapter compatible with the surface
     let adapter_opts = wgpu_core::instance::RequestAdapterOptions {
@@ -1956,23 +2280,31 @@ pub fn create_device_from_window(
     let adapter_id = context
         .inner()
         .request_adapter(&adapter_opts, wgt::Backends::all(), None)
-        .map_err(|e| BasaltError::Device(format!("Failed to find adapter: {:?}", e)))?;
+        .map_err(|e| BasaltError::device_creation(format!("Failed to find adapter: {:?}", e)))?;
 
     // Request device with required features (matching wgpu-mc)
-    let mut device_desc = wgt::DeviceDescriptor::default();
-    device_desc.label = Some(Cow::Borrowed("Bassalt Device"));
-    device_desc.required_features = wgt::Features::DEPTH_CLIP_CONTROL
-        | wgt::Features::PUSH_CONSTANTS;
-    device_desc.required_limits = wgt::Limits {
-        max_push_constant_size: 128,
-        max_bind_groups: 8,
-        ..wgt::Limits::default()
+    // wgpu 27.0 requires explicit memory_hints and experimental_features
+    let device_desc = wgt::DeviceDescriptor {
+        label: Some(Cow::Borrowed("Bassalt Device")),
+        required_features: wgt::Features::DEPTH_CLIP_CONTROL
+            | wgt::Features::PUSH_CONSTANTS,
+        required_limits: wgt::Limits {
+            max_push_constant_size: 128,
+            max_bind_groups: 8,
+            ..wgt::Limits::default()
+        },
+        // wgpu 27.0: Explicit memory hints for better allocation strategy
+        memory_hints: wgt::MemoryHints::Performance,
+        // wgpu 27.0: Explicitly disable experimental features for stability
+        experimental_features: wgt::ExperimentalFeatures::disabled(),
+        // wgpu 27.0: Explicit trace path (None = Off)
+        trace: wgt::Trace::Off,
     };
 
     let (device_id, queue_id) = context
         .inner()
         .adapter_request_device(adapter_id, &device_desc, None, None)
-        .map_err(|e| BasaltError::Device(format!("Failed to create device: {:?}", e)))?;
+        .map_err(|e| BasaltError::device_creation(format!("Failed to create device: {:?}", e)))?;
 
     // Wrap surface in BasaltSurface
     let mut bassalt_surface = BasaltSurface::from_id(context.clone(), surface_id);
@@ -1981,7 +2313,7 @@ pub fn create_device_from_window(
     let surface_caps = context
         .inner()
         .surface_get_capabilities(surface_id, adapter_id)
-        .map_err(|e| BasaltError::Surface(format!("Failed to get surface capabilities: {:?}", e)))?;
+        .map_err(|e| BasaltError::surface(format!("Failed to get surface capabilities: {:?}", e)))?;
 
     // Prefer Bgra8Unorm (standard for most displays, what wgpu-mc uses)
     // Fall back to Bgra8UnormSrgb, then Rgba variants, then first available
@@ -2025,6 +2357,10 @@ pub fn create_device_from_window(
 
     log::info!("Selected present mode: {:?} (available: {:?})", present_mode, surface_caps.present_modes);
 
+    // wgpu 27.0: Build view_formats with sRGB fallbacks for better compatibility
+    // This allows render passes to use either the base format or its sRGB variant
+    let view_formats = build_view_formats(&surface_format, &surface_caps.formats);
+
     // Configure the surface
     let surface_config = wgt::SurfaceConfiguration {
         usage: wgt::TextureUsages::RENDER_ATTACHMENT,
@@ -2034,8 +2370,10 @@ pub fn create_device_from_window(
         present_mode,
         desired_maximum_frame_latency: 2,
         alpha_mode: wgt::CompositeAlphaMode::Auto,
-        view_formats: vec![],
+        view_formats,
     };
+
+    log::info!("Surface configured with view_formats: {:?}", surface_config.view_formats);
 
     bassalt_surface.configure(device_id, surface_config)?;
 

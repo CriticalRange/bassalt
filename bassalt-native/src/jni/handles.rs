@@ -29,8 +29,8 @@ impl<V: Sized> HandleStore<V> {
     }
 
     /// Get a reference to a value by handle
-    pub fn get(&self, handle: u64) -> Option<&V> {
-        let data = self.data.lock();
+    pub fn get(&self, _handle: u64) -> Option<&V> {
+        let _data = self.data.lock();
         // Safety: This is actually incorrect - we can't return a reference while holding the lock
         // For now, this is a placeholder. Real implementation would use different patterns.
         None

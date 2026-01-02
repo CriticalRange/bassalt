@@ -96,6 +96,9 @@ pub struct RenderPassState {
     // Render pass configuration
     color_view: Option<id::TextureViewId>,
     depth_view: Option<id::TextureViewId>,
+    // Track the output texture for main framebuffer detection
+    // This will be set as the main framebuffer AFTER the render pass executes
+    output_texture: Option<id::TextureId>,
     should_clear_color: bool,
     clear_color: wgt::Color,
     should_clear_depth: bool,
@@ -109,7 +112,7 @@ pub struct RenderPassState {
     // Recorded commands
     commands: Vec<RenderCommand>,
     is_active: bool,
-    
+
     // Track which bind groups are set (for validation)
     bind_groups_set: [bool; 4],
     pipeline_set: bool,
@@ -123,6 +126,7 @@ impl RenderPassState {
         queue_id: id::QueueId,
         color_view: Option<id::TextureViewId>,
         depth_view: Option<id::TextureViewId>,
+        output_texture: Option<id::TextureId>, // The texture that will be rendered
         should_clear_color: bool,
         clear_color: u32,
         should_clear_depth: bool,
@@ -141,7 +145,7 @@ impl RenderPassState {
             .device_create_command_encoder(device_id, &encoder_desc, None);
 
         if let Some(e) = error {
-            return Err(BasaltError::Device(format!("Failed to create command encoder: {:?}", e)));
+            return Err(BasaltError::device_creation(format!("Failed to create command encoder: {:?}", e)));
         }
 
         // Convert clear color from u32 ARGB (Minecraft format) to wgt::Color
@@ -157,6 +161,7 @@ impl RenderPassState {
             command_encoder_id,
             color_view,
             depth_view,
+            output_texture,
             should_clear_color,
             clear_color: wgt::Color { r, g, b, a },
             should_clear_depth,
@@ -362,10 +367,11 @@ impl RenderPassState {
     /// End the render pass and submit to the queue
     ///
     /// Executes all recorded commands using wgpu-core 27's command_encoder_run_render_pass.
-    pub fn finish_and_submit(&mut self, context: &BasaltContext, queue_id: id::QueueId) -> Result<()> {
+    /// Returns the output texture (if any) for main framebuffer tracking.
+    pub fn finish_and_submit(&mut self, context: &BasaltContext, queue_id: id::QueueId) -> Result<Option<id::TextureId>> {
         if !self.is_active {
             log::warn!("Render pass is not active, skipping submit");
-            return Ok(());
+            return Ok(None);
         }
 
         log::info!("Finishing render pass with {} commands, color_view={:?}", 
@@ -427,10 +433,10 @@ impl RenderPassState {
 
         // Take ownership of commands vec to execute them
         let commands = std::mem::take(&mut self.commands);
-        
+
         if color_attachments.is_empty() {
             log::error!("No color attachments - render pass has nothing to render to!");
-            return Err(BasaltError::Device("No color attachment".into()));
+            return Err(BasaltError::device_creation("No color attachment"));
         }
 
         log::info!("Beginning render pass with {} color attachments", color_attachments.len());
@@ -442,33 +448,29 @@ impl RenderPassState {
         );
 
         if let Some(e) = error {
-            return Err(BasaltError::Device(format!(
+            return Err(BasaltError::device_creation(format!(
                 "Failed to begin render pass: {:?}", e
             )));
         }
 
-        // Execute all recorded commands
-        for cmd in commands.iter() {
+        // Execute all recorded commands with proper error propagation
+        for (cmd_index, cmd) in commands.iter().enumerate() {
             match cmd {
                 RenderCommand::SetPipeline { pipeline_id } => {
-                    if let Err(e) = global.render_pass_set_pipeline(&mut render_pass, *pipeline_id) {
-                        log::error!("Failed to set pipeline: {:?}", e);
-                    }
+                    global.render_pass_set_pipeline(&mut render_pass, *pipeline_id)
+                        .map_err(|e| BasaltError::RenderPass(format!("Command {}: Failed to set pipeline {:?}: {:?}", cmd_index, pipeline_id, e)))?;
                 }
                 RenderCommand::SetVertexBuffer { slot, buffer_id, offset, size } => {
-                    if let Err(e) = global.render_pass_set_vertex_buffer(&mut render_pass, *slot, *buffer_id, *offset, *size) {
-                        log::error!("Failed to set vertex buffer: {:?}", e);
-                    }
+                    global.render_pass_set_vertex_buffer(&mut render_pass, *slot, *buffer_id, *offset, *size)
+                        .map_err(|e| BasaltError::RenderPass(format!("Command {}: Failed to set vertex buffer (slot={}, buffer={:?}): {:?}", cmd_index, slot, buffer_id, e)))?;
                 }
                 RenderCommand::SetIndexBuffer { buffer_id, index_format, offset, size } => {
-                    if let Err(e) = global.render_pass_set_index_buffer(&mut render_pass, *buffer_id, *index_format, *offset, *size) {
-                        log::error!("Failed to set index buffer: {:?}", e);
-                    }
+                    global.render_pass_set_index_buffer(&mut render_pass, *buffer_id, *index_format, *offset, *size)
+                        .map_err(|e| BasaltError::RenderPass(format!("Command {}: Failed to set index buffer {:?}: {:?}", cmd_index, buffer_id, e)))?;
                 }
                 RenderCommand::SetBindGroup { index, bind_group_id, offsets } => {
-                    if let Err(e) = global.render_pass_set_bind_group(&mut render_pass, *index, *bind_group_id, offsets) {
-                        log::error!("Failed to set bind group: {:?}", e);
-                    }
+                    global.render_pass_set_bind_group(&mut render_pass, *index, *bind_group_id, offsets)
+                        .map_err(|e| BasaltError::RenderPass(format!("Command {}: Failed to set bind group (index={}, group={:?}): {:?}", cmd_index, index, bind_group_id, e)))?;
                 }
                 RenderCommand::DrawIndexed {
                     index_count,
@@ -477,18 +479,16 @@ impl RenderPassState {
                     base_vertex,
                     first_instance,
                 } => {
-                    log::info!("DrawIndexed: indices={}, instances={}, first_idx={}, base_vtx={}", 
+                    log::info!(">>> EXECUTING DRAW: indices={}, instances={}, first_idx={}, base_vtx={}",
                         index_count, instance_count, first_index, base_vertex);
-                    if let Err(e) = global.render_pass_draw_indexed(
+                    global.render_pass_draw_indexed(
                         &mut render_pass,
                         *index_count,
                         *instance_count,
                         *first_index,
                         *base_vertex,
                         *first_instance,
-                    ) {
-                        log::error!("Failed to draw indexed: {:?}", e);
-                    }
+                    ).map_err(|e| BasaltError::RenderPass(format!("Command {}: Failed to draw indexed (indices={}, instances={}): {:?}", cmd_index, index_count, instance_count, e)))?;
                 }
                 RenderCommand::Draw {
                     vertex_count,
@@ -496,50 +496,45 @@ impl RenderPassState {
                     first_vertex,
                     first_instance,
                 } => {
-                    log::debug!("Draw: vertices={}, instances={}, first_vtx={}", 
+                    log::debug!("Draw: vertices={}, instances={}, first_vtx={}",
                         vertex_count, instance_count, first_vertex);
-                    if let Err(e) = global.render_pass_draw(
+                    global.render_pass_draw(
                         &mut render_pass,
                         *vertex_count,
                         *instance_count,
                         *first_vertex,
                         *first_instance,
-                    ) {
-                        log::error!("Failed to draw: {:?}", e);
-                    }
+                    ).map_err(|e| BasaltError::RenderPass(format!("Command {}: Failed to draw (vertices={}, instances={}): {:?}", cmd_index, vertex_count, instance_count, e)))?;
                 }
                 RenderCommand::SetViewport { x, y, width, height, min_depth, max_depth } => {
-                    if let Err(e) = global.render_pass_set_viewport(&mut render_pass, *x, *y, *width, *height, *min_depth, *max_depth) {
-                        log::error!("Failed to set viewport: {:?}", e);
-                    }
+                    global.render_pass_set_viewport(&mut render_pass, *x, *y, *width, *height, *min_depth, *max_depth)
+                        .map_err(|e| BasaltError::RenderPass(format!("Command {}: Failed to set viewport: {:?}", cmd_index, e)))?;
                 }
                 RenderCommand::SetScissorRect { x, y, width, height } => {
-                    if let Err(e) = global.render_pass_set_scissor_rect(&mut render_pass, *x, *y, *width, *height) {
-                        log::error!("Failed to set scissor rect: {:?}", e);
-                    }
+                    global.render_pass_set_scissor_rect(&mut render_pass, *x, *y, *width, *height)
+                        .map_err(|e| BasaltError::RenderPass(format!("Command {}: Failed to set scissor rect: {:?}", cmd_index, e)))?;
                 }
                 RenderCommand::PushDebugGroup { label } => {
-                    // Use white color (0xFFFFFFFF) for debug groups
+                    // Debug groups are optional - log errors but don't fail
                     let _ = global.render_pass_push_debug_group(&mut render_pass, label, 0xFFFFFFFF);
                 }
                 RenderCommand::PopDebugGroup => {
                     let _ = global.render_pass_pop_debug_group(&mut render_pass);
                 }
                 RenderCommand::InsertDebugMarker { label } => {
-                    // Use white color (0xFFFFFFFF) for debug markers
+                    // Debug markers are optional - log errors but don't fail
                     let _ = global.render_pass_insert_debug_marker(&mut render_pass, label, 0xFFFFFFFF);
                 }
                 RenderCommand::SetPushConstants { stages, offset, data } => {
-                    if let Err(e) = global.render_pass_set_push_constants(&mut render_pass, *stages, *offset, data) {
-                        log::error!("Failed to set push constants: {:?}", e);
-                    }
+                    global.render_pass_set_push_constants(&mut render_pass, *stages, *offset, data)
+                        .map_err(|e| BasaltError::RenderPass(format!("Command {}: Failed to set push constants (offset={}, size={}): {:?}", cmd_index, offset, data.len(), e)))?;
                 }
             }
         }
 
         // End the render pass
         if let Err(e) = global.render_pass_end(&mut render_pass) {
-            return Err(BasaltError::Device(format!(
+            return Err(BasaltError::device_creation(format!(
                 "Failed to end render pass: {:?}", e
             )));
         }
@@ -552,7 +547,7 @@ impl RenderPassState {
         );
 
         if let Some(e) = error {
-            return Err(BasaltError::Device(format!(
+            return Err(BasaltError::device_creation(format!(
                 "Failed to finish command encoder: {:?}", e
             )));
         }
@@ -561,14 +556,22 @@ impl RenderPassState {
         let result = global.queue_submit(queue_id, &[command_buffer_id]);
 
         if let Err(e) = result {
-            return Err(BasaltError::Device(format!(
+            return Err(BasaltError::device_creation(format!(
                 "Failed to submit command buffer: {:?}", e
             )));
         }
 
         self.is_active = false;
         log::debug!("Render pass executed with {} commands and submitted to queue", commands.len());
-        Ok(())
+
+        // Return the output texture for main framebuffer tracking
+        // This is set AFTER rendering completes, avoiding the race condition
+        let output = self.output_texture;
+        if output.is_some() {
+            log::info!("Render pass completed, output texture: {:?} (ready for presentation)", output);
+        }
+
+        Ok(output)
     }
     
     /// Mark the render pass as inactive without submitting

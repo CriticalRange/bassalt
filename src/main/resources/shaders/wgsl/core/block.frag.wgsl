@@ -1,10 +1,6 @@
 // Block fragment shader
-// 
-// Uniform layout (consistent with vertex shader):
-// Group 0: Sampler0 (block texture) + Sampler2 (lightmap)
-// Group 1: DynamicTransforms
-// Group 2: Projection (declared for layout consistency)
-// Group 3: Fog
+//
+// All bindings in group 0 to match Bassalt's single bind group approach
 
 struct DynamicTransforms {
     ModelViewMat: mat4x4<f32>,
@@ -18,17 +14,31 @@ struct Projection {
     ProjMat: mat4x4<f32>,
 }
 
-// Group 0: Textures (block texture at 0,1 - lightmap at 2,3)
+// Fog matches GLSL std140 layout exactly (48 bytes)
+struct Fog {
+    FogColor: vec4<f32>,
+    FogEnvironmentalStart: f32,
+    FogEnvironmentalEnd: f32,
+    FogRenderDistanceStart: f32,
+    FogRenderDistanceEnd: f32,
+    FogSkyEnd: f32,
+    FogCloudsEnd: f32,
+    _pad3: f32,
+    _pad4: f32,
+}
+
+// All bindings in group 0 with different binding indices
+// Bindings 0-1: Textures (Sampler0, Sampler0Sampler)
+// Binding 4: DynamicTransforms
+// Binding 5: Projection
+// Binding 8: Fog
+
 @group(0) @binding(0) var Sampler0: texture_2d<f32>;
 @group(0) @binding(1) var Sampler0Sampler: sampler;
-@group(0) @binding(2) var Sampler2: texture_2d<f32>;
-@group(0) @binding(3) var Sampler2Sampler: sampler;
 
-// Group 1: DynamicTransforms (for ColorModulator)
-@group(1) @binding(0) var<uniform> transforms: DynamicTransforms;
-
-// Group 2: Projection
-@group(2) @binding(0) var<uniform> projection: Projection;
+@group(0) @binding(4) var<uniform> transforms: DynamicTransforms;
+@group(0) @binding(5) var<uniform> projection: Projection;
+@group(0) @binding(8) var<uniform> fog: Fog;
 
 struct FragmentInput {
     @location(0) tex_coord: vec2<f32>,
@@ -37,15 +47,39 @@ struct FragmentInput {
     @location(3) cylindrical_dist: f32,
 }
 
+fn linear_fog_value(vertexDistance: f32, fogStart: f32, fogEnd: f32) -> f32 {
+    if (vertexDistance <= fogStart) {
+        return 0.0;
+    } else if (vertexDistance >= fogEnd) {
+        return 1.0;
+    }
+    return (vertexDistance - fogStart) / (fogEnd - fogStart);
+}
+
+fn total_fog_value(sphericalVertexDistance: f32, cylindricalVertexDistance: f32) -> f32 {
+    let envFog = linear_fog_value(sphericalVertexDistance, fog.FogEnvironmentalStart, fog.FogEnvironmentalEnd);
+    let renderFog = linear_fog_value(cylindricalVertexDistance, fog.FogRenderDistanceStart, fog.FogRenderDistanceEnd);
+    return max(envFog, renderFog);
+}
+
+fn apply_fog(inColor: vec4<f32>, sphericalVertexDistance: f32, cylindricalVertexDistance: f32) -> vec4<f32> {
+    let fogValue = total_fog_value(sphericalVertexDistance, cylindricalVertexDistance);
+    let rgb = mix(inColor.rgb, fog.FogColor.rgb, fogValue * fog.FogColor.a);
+    return vec4<f32>(rgb, inColor.a);
+}
+
 @fragment
 fn main(in: FragmentInput) -> @location(0) vec4<f32> {
     let tex_color = textureSample(Sampler0, Sampler0Sampler, in.tex_coord);
     var color = tex_color * in.vertex_color * transforms.ColorModulator;
-    
+
     // Alpha cutout (ALPHA_CUTOUT = 0.5)
     if (color.a < 0.5) {
         discard;
     }
-    
+
+    // Apply fog
+    color = apply_fog(color, in.spherical_dist, in.cylindrical_dist);
+
     return color;
 }

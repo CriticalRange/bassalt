@@ -1,6 +1,4 @@
-use jni::JNIEnv;
-use jni::objects::JClass;
-use jni::sys::{jlong, jint, jboolean};
+use jni::sys::jlong;
 
 /// Helper function to extract a reference from a raw pointer handle
 ///

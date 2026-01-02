@@ -12,6 +12,7 @@ mod adapter;
 mod surface;
 mod buffer;
 mod texture;
+mod texture_and_view;
 mod sampler;
 mod pipeline;
 mod shader;
@@ -23,12 +24,13 @@ mod bind_group;
 mod bind_group_layouts;
 mod range_allocator;
 mod atlas;
+mod pipeline_registry;
 
 use std::borrow::Cow;
 use std::sync::Arc;
 use ::jni::JNIEnv;
 use ::jni::objects::{JByteArray, JClass, JString, JObject};
-use ::jni::sys::{jlong, jint, jboolean, jstring, jfloat, jvalue};
+use ::jni::sys::{jlong, jint, jboolean, jstring, jfloat};
 use once_cell::sync::OnceCell;
 use log::info;
 use wgpu_types as wgt;
@@ -303,7 +305,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_getM
 /// Get enabled extensions/features as a comma-separated string
 #[no_mangle]
 pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_getEnabledFeatures0(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
     device_ptr: jlong,
 ) -> jstring {
@@ -1164,29 +1166,32 @@ fn create_layout_from_shaders(
         };
         
         let (bgl_id, bgl_error) = global.device_create_bind_group_layout(device_id, &bgl_desc, None);
-        
+
         if let Some(e) = bgl_error {
-            return Err(BasaltError::Device(format!(
-                "Failed to create bind group layout for group {}: {:?}",
-                group_idx, e
-            )));
+            return Err(BasaltError::resource_creation(
+                "bind group layout",
+                format!("Failed to create bind group layout for group {}: {:?}", group_idx, e)
+            ));
         }
-        
+
         log::debug!("Created bind group layout for group {}: {:?}", group_idx, bgl_id);
         bind_group_layout_ids.push(bgl_id);
     }
-    
-    // Collect binding layouts from group 0 for compatibility with existing code
-    let binding_layouts: Vec<BindingLayoutEntry> = bindings_by_group.get(&0)
-        .map(|group_bindings| {
+
+    // Collect binding layouts from ALL groups (not just group 0)
+    // This enables proper multi-group bind group support
+    let binding_layouts: Vec<BindingLayoutEntry> = bindings_by_group
+        .iter()
+        .flat_map(|(group_idx, group_bindings)| {
             group_bindings.iter()
-                .map(|(binding, (entry, ty, min_size, var_name))| {
+                .map(move |(binding, (entry, ty, min_size, var_name))| {
                     let expected_dimension = if let wgt::BindingType::Texture { view_dimension, .. } = entry.ty {
                         Some(view_dimension)
                     } else {
                         None
                     };
                     BindingLayoutEntry {
+                        group: *group_idx,  // Include which group this binding belongs to
                         binding: *binding,
                         ty: *ty,
                         min_binding_size: *min_size,
@@ -1194,13 +1199,12 @@ fn create_layout_from_shaders(
                         variable_name: var_name.clone(),
                     }
                 })
-                .collect()
         })
-        .unwrap_or_default();
+        .collect();
 
-    log::info!("Creating pipeline layout with {} bind groups, binding_layouts: {:?}", 
+    log::info!("Creating pipeline layout with {} bind groups, {} total bindings across all groups",
         bind_group_layout_ids.len(),
-        binding_layouts.iter().map(|e| (e.binding, e.ty, e.expected_dimension)).collect::<Vec<_>>());
+        binding_layouts.len());
 
     // Create pipeline layout with all bind group layouts
     let pl_desc = binding_model::PipelineLayoutDescriptor {
@@ -1218,10 +1222,10 @@ fn create_layout_from_shaders(
     let (pl_id, pl_error) = global.device_create_pipeline_layout(device_id, &pl_desc, None);
 
     if let Some(e) = pl_error {
-        return Err(BasaltError::Device(format!(
-            "Failed to create pipeline layout: {:?}",
-            e
-        )));
+        return Err(BasaltError::resource_creation(
+            "pipeline layout",
+            format!("Failed to create pipeline layout: {:?}", e)
+        ));
     }
 
     // Return the first bind group layout ID for compatibility
@@ -1239,6 +1243,7 @@ fn create_layout_from_shaders(
 }
 
 /// Create a render pipeline from pre-converted WGSL shaders
+/// Uses PipelineCache for fast shader compilation and pipeline reuse
 #[no_mangle]
 pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_createNativePipelineFromWgsl(
     mut env: JNIEnv,
@@ -1246,17 +1251,15 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
     device_ptr: jlong,
     vertex_shader: JString,
     fragment_shader: JString,
-    _vertex_format: jint,
+    vertex_format: jint,
     primitive_topology: jint,
     depth_test_enabled: jboolean,
     depth_write_enabled: jboolean,
     depth_compare: jint,
     blend_enabled: jboolean,
-    blend_color_factor: jint,
-    blend_alpha_factor: jint,
+    _blend_color_factor: jint,
+    _blend_alpha_factor: jint,
 ) -> jlong {
-    use std::borrow::Cow;
-    use wgpu_core::pipeline;
     use naga::front;
 
     // Validate device pointer
@@ -1298,8 +1301,8 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
         }
     };
 
-    // Parse WGSL shaders
-    println!("[Bassalt] Parsing WGSL shaders...");
+    // Parse WGSL shaders once for layout creation and caching
+    println!("[Bassalt] Parsing WGSL shaders for layout reflection...");
     let vertex_module = match front::wgsl::parse_str(&vertex_wgsl) {
         Ok(module) => module,
         Err(e) => {
@@ -1309,7 +1312,6 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
             return 0;
         }
     };
-    println!("[Bassalt] Vertex WGSL parsed successfully");
 
     let fragment_module = match front::wgsl::parse_str(&fragment_wgsl) {
         Ok(module) => module,
@@ -1320,10 +1322,9 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
             return 0;
         }
     };
-    println!("[Bassalt] Fragment WGSL parsed successfully");
+    println!("[Bassalt] WGSL shaders parsed for layout");
 
-    // Create pipeline layout from shader reflection
-    println!("[Bassalt] Creating pipeline layout from shader reflection...");
+    // Create pipeline layout from shader reflection (needed for cache key)
     let (bind_group_layout_id, pipeline_layout_id, bind_group_layout_ids, binding_layouts) = match create_layout_from_shaders(
         device_context,
         device_id,
@@ -1338,46 +1339,9 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
             return 0;
         }
     };
-    println!("[Bassalt] Pipeline layout created successfully");
+    println!("[Bassalt] Pipeline layout created for cache");
 
-    // Create shader modules
-    println!("[Bassalt] Creating vertex shader module...");
-    let vs_desc = pipeline::ShaderModuleDescriptor {
-        label: Some(Cow::Borrowed("Vertex Shader")),
-        runtime_checks: wgt::ShaderRuntimeChecks::default(),
-    };
-    let vs_source = pipeline::ShaderModuleSource::Naga(Cow::Owned(vertex_module));
-
-    let (vertex_shader_id, vs_error) = device_context.inner()
-        .device_create_shader_module(device_id, &vs_desc, vs_source, None);
-
-    if let Some(e) = vs_error {
-        let msg = format!("Failed to create vertex shader module: {:?}", e);
-        log::error!("{}", msg);
-        let _ = env.throw_new("java/lang/RuntimeException", &msg);
-        return 0;
-    }
-    println!("[Bassalt] Vertex shader module created successfully");
-
-    println!("[Bassalt] Creating fragment shader module...");
-    let fs_desc = pipeline::ShaderModuleDescriptor {
-        label: Some(Cow::Borrowed("Fragment Shader")),
-        runtime_checks: wgt::ShaderRuntimeChecks::default(),
-    };
-    let fs_source = pipeline::ShaderModuleSource::Naga(Cow::Owned(fragment_module));
-
-    let (fragment_shader_id, fs_error) = device_context.inner()
-        .device_create_shader_module(device_id, &fs_desc, fs_source, None);
-
-    if let Some(e) = fs_error {
-        let msg = format!("Failed to create fragment shader module: {:?}", e);
-        log::error!("{}", msg);
-        let _ = env.throw_new("java/lang/RuntimeException", &msg);
-        return 0;
-    }
-    println!("[Bassalt] Fragment shader module created successfully");
-
-    // Map pipeline parameters (same as createRenderPipeline)
+    // Map pipeline parameters
     let primitive_topology = match primitive_topology as u32 {
         0 => wgt::PrimitiveTopology::PointList,
         1 => wgt::PrimitiveTopology::LineList,
@@ -1399,130 +1363,88 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
         _ => wgt::CompareFunction::Less,
     };
 
-    let blend_state = if blend_enabled != 0 {
-        let color_factor = match blend_color_factor as u32 {
-            0 => wgt::BlendFactor::Zero,
-            1 => wgt::BlendFactor::One,
-            2 => wgt::BlendFactor::Src,
-            3 => wgt::BlendFactor::OneMinusSrc,
-            4 => wgt::BlendFactor::Dst,
-            5 => wgt::BlendFactor::OneMinusDst,
-            6 => wgt::BlendFactor::SrcAlpha,
-            7 => wgt::BlendFactor::OneMinusSrcAlpha,
-            8 => wgt::BlendFactor::DstAlpha,
-            9 => wgt::BlendFactor::OneMinusDstAlpha,
-            _ => wgt::BlendFactor::One,
-        };
-        let alpha_factor = match blend_alpha_factor as u32 {
-            0 => wgt::BlendFactor::Zero,
-            1 => wgt::BlendFactor::One,
-            2 => wgt::BlendFactor::Src,
-            3 => wgt::BlendFactor::OneMinusSrc,
-            4 => wgt::BlendFactor::Dst,
-            5 => wgt::BlendFactor::OneMinusDst,
-            6 => wgt::BlendFactor::SrcAlpha,
-            7 => wgt::BlendFactor::OneMinusSrcAlpha,
-            8 => wgt::BlendFactor::DstAlpha,
-            9 => wgt::BlendFactor::OneMinusDstAlpha,
-            _ => wgt::BlendFactor::One,
-        };
-
-        Some(wgt::BlendState {
-            color: wgt::BlendComponent {
-                src_factor: color_factor,
-                dst_factor: wgt::BlendFactor::OneMinusSrcAlpha,
-                operation: wgt::BlendOperation::Add,
-            },
-            alpha: wgt::BlendComponent {
-                src_factor: alpha_factor,
-                dst_factor: wgt::BlendFactor::OneMinusSrcAlpha,
-                operation: wgt::BlendOperation::Add,
-            },
-        })
+    // Depth format - check if fragment shader writes depth, otherwise disable depth testing
+    // GUI shaders and other 2D shaders don't write depth, so they shouldn't have depth state
+    let fragment_naga_module = match naga::front::wgsl::parse_str(&fragment_wgsl) {
+        Ok(module) => module,
+        Err(e) => {
+            let msg = format!("Failed to parse fragment WGSL for depth analysis: {:?}", e);
+            log::error!("{}", msg);
+            println!("[Bassalt] ERROR: {}", msg);
+            let _ = env.throw_new("java/lang/RuntimeException", &msg);
+            return 0;
+        }
+    };
+    let shader_has_depth_output = shader_writes_depth(&fragment_naga_module);
+    let depth_format = if shader_has_depth_output {
+        resource_handles::PipelineDepthFormat::Depth32Float
     } else {
-        None
+        log::info!("Fragment shader does not write depth, disabling depth testing for this pipeline");
+        resource_handles::PipelineDepthFormat::None
     };
 
-    // Use the pipeline layout created from shader reflection
-    // (pipeline_layout_id is already set above from create_layout_from_shaders)
-
-    // Create render pipeline descriptor with the reflected layout
-    let pipeline_desc = pipeline::RenderPipelineDescriptor {
-        label: Some(Cow::Borrowed("Basalt Render Pipeline")),
-        layout: Some(pipeline_layout_id),
-        vertex: pipeline::VertexState {
-            stage: pipeline::ProgrammableStageDescriptor {
-                module: vertex_shader_id,
-                entry_point: Some(Cow::Borrowed("main")),
-                constants: Default::default(),
-                zero_initialize_workgroup_memory: true,
-            },
-            // Create vertex buffer layout based on vertex format
-            // 0 = POSITION (3 floats)
-            // 1 = POSITION_COLOR (3 floats + 4 floats)
-            // 2 = POSITION_TEX (3 floats + 2 floats)
-            // 3 = POSITION_TEX_COLOR (3 floats + 2 floats + 4 floats)
-            // 4 = POSITION_TEX_COLOR_NORMAL (3 floats + 2 floats + 4 floats + 3 floats)
-            buffers: create_vertex_buffer_layout(_vertex_format as usize),
-        },
-        primitive: wgt::PrimitiveState {
-            topology: primitive_topology,
-            strip_index_format: None,
-            front_face: wgt::FrontFace::Ccw,
-            cull_mode: None,
-            unclipped_depth: false,
-            polygon_mode: wgt::PolygonMode::Fill,
-            conservative: false,
-        },
-        // MC is NOT consistent: uses NO_DEPTH_TEST pipelines with depth-enabled render targets
-        // WebGPU requires exact match, so we ALWAYS include depth_stencil
-        // For NO_DEPTH_TEST: use Always compare (everything passes) + no write
-        depth_stencil: Some(wgt::DepthStencilState {
-            format: wgt::TextureFormat::Depth32Float,
-            depth_write_enabled: if depth_test_enabled != 0 { depth_write_enabled != 0 } else { false },
-            depth_compare: if depth_test_enabled != 0 { depth_compare } else { wgt::CompareFunction::Always },
-            stencil: wgt::StencilState::default(),
-            bias: wgt::DepthBiasState::default(),
-        }),
-        multisample: wgt::MultisampleState::default(),
-        fragment: Some(pipeline::FragmentState {
-            stage: pipeline::ProgrammableStageDescriptor {
-                module: fragment_shader_id,
-                entry_point: Some(Cow::Borrowed("main")),
-                constants: Default::default(),
-                zero_initialize_workgroup_memory: true,
-            },
-            targets: Cow::Owned(vec![Some(wgt::ColorTargetState {
-                format: wgt::TextureFormat::Rgba8Unorm,
-                blend: blend_state,
-                write_mask: wgt::ColorWrites::ALL,
-            })]),
-        }),
-        multiview: None,
-        cache: None,
+    // Use PipelineCache for fast pipeline creation
+    // The cache will:
+    // 1. Check if we've seen this (vertex_shader, fragment_shader, topology, depth, blend) combo before
+    // 2. If cached, return immediately
+    // 3. If not, compile shaders and create pipeline, then cache for next time
+    let cache_key = pipeline_registry::RenderPipelineKey {
+        vertex_shader_hash: pipeline_registry::PipelineCache::hash_wgsl(&vertex_wgsl),
+        fragment_shader_hash: pipeline_registry::PipelineCache::hash_wgsl(&fragment_wgsl),
+        topology: primitive_topology,
+        depth_test_enabled: depth_test_enabled != 0,
+        depth_write_enabled: depth_write_enabled != 0,
+        depth_compare,
+        blend_enabled: blend_enabled != 0,
+        target_format: wgt::TextureFormat::Rgba8Unorm,
+        depth_format,  // CRITICAL: Include depth format in cache key!
     };
 
-    // Depth format tracking - always Depth32Float since pipelines always have depth_stencil
-    let depth_format = resource_handles::PipelineDepthFormat::Depth32Float;
+    let label = format!("NativePipeline_vfmt{}", vertex_format);
 
-    // Create the render pipeline
-    println!("[Bassalt] Creating render pipeline...");
-    let (pipeline_id, pipeline_error) = device_context.inner()
-        .device_create_render_pipeline(device_id, &pipeline_desc, None);
+    println!("[Bassalt] Checking pipeline cache for key hash {:x}...", pipeline_registry::PipelineCache::hash_key(&cache_key));
 
-    if let Some(e) = pipeline_error {
-        let msg = format!("Failed to create render pipeline: {:?}", e);
-        log::error!("{}", msg);
-        println!("[Bassalt] ERROR: {}", msg);
-        let _ = env.throw_new("java/lang/RuntimeException", &msg);
-        return 0;
-    }
-    println!("[Bassalt] Render pipeline created successfully!");
+    let cached_pipeline = match device.pipeline_cache.get_or_create_render_pipeline(
+        device_context,
+        device_id,
+        cache_key,
+        &vertex_wgsl,
+        &fragment_wgsl,
+        pipeline_layout_id,
+        bind_group_layout_ids.clone(),
+        binding_layouts.clone(),
+        depth_format,
+        vertex_format as usize,
+        &label,
+    ) {
+        Ok(pipeline) => pipeline,
+        Err(e) => {
+            let msg = format!("Failed to create pipeline (via cache): {:?}", e);
+            log::error!("{}", msg);
+            println!("[Bassalt] ERROR: {}", msg);
+            let _ = env.throw_new("java/lang/RuntimeException", &msg);
+            return 0;
+        }
+    };
+
+    // Log cache statistics
+    let stats = device.pipeline_cache.stats();
+    println!("[Bassalt] Pipeline cache stats - shader_hits: {}, shader_misses: {}, pipeline_hits: {}, pipeline_misses: {}, total_pipelines: {}",
+        stats.shader_hits, stats.shader_misses, stats.pipeline_hits, stats.pipeline_misses, stats.total_pipelines);
+
+    let pipeline_id = cached_pipeline.pipeline_id;
+    println!("[Bassalt] Render pipeline created successfully via cache!");
 
     let num_bindings = binding_layouts.len();
     let num_groups = bind_group_layout_ids.len();
-    let handle = HANDLES.insert_render_pipeline(pipeline_id, bind_group_layout_id, bind_group_layout_ids, binding_layouts, depth_format);
-    log::info!("Created render pipeline from WGSL with handle {} (bgl: {:?}, groups: {}, bindings: {}, depth: {:?})",
+    let handle = HANDLES.insert_render_pipeline(
+        pipeline_id,
+        bind_group_layout_id,
+        bind_group_layout_ids,
+        binding_layouts,
+        depth_format,
+    );
+    log::info!("Created render pipeline via cache with handle {} (bgl: {:?}, groups: {}, bindings: {}, depth: {:?})",
                handle, bind_group_layout_id, num_groups, num_bindings, depth_format);
     println!("[Bassalt] Pipeline handle: {}", handle);
     handle as jlong
@@ -1565,6 +1487,10 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_begi
         None
     };
 
+    // Use clear parameters from Java
+    let do_clear_color = should_clear_color != 0;
+    let clear_color_argb = clear_color as u32;
+
     // Always need depth view since pipelines always have depth_stencil
     // If MC doesn't provide one, create a matching-size depth texture
     let depth_view = if depth_view_handle != 0 {
@@ -1581,20 +1507,20 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_begi
         }
     };
 
-    // Track the color view's parent texture for later blitting
-    // We'll update main_framebuffer when the render pass ENDS to use the LAST render target
-    if color_view_handle != 0 {
-        if let Some(view_info) = HANDLES.get_texture_view_info(color_view_handle as u64) {
-            // Only set as main framebuffer if it matches swapchain size (likely final output)
-            // Actually, always update - we want the LAST render pass target
-            device.set_main_framebuffer(view_info.texture_id);
-            log::info!("Set main framebuffer from render pass color target: texture={:?}, view={:?}", 
-                view_info.texture_id, color_view);
-        }
-    }
+    // Extract the output texture ID from the color view for main framebuffer tracking
+    // This will be set as the main framebuffer AFTER the render pass completes
+    let output_texture = if color_view_handle != 0 {
+        HANDLES.get_texture_view_info(color_view_handle as u64)
+            .map(|view_info| {
+                log::info!("beginRenderPass: output texture will be {:?}", view_info.texture_id);
+                view_info.texture_id
+            })
+    } else {
+        None
+    };
 
-    log::info!("beginRenderPass: should_clear_color={}, should_clear_depth={}", 
-        should_clear_color != 0, should_clear_depth != 0);
+    log::info!("beginRenderPass: should_clear_color={}, should_clear_depth={}, output_texture={:?}",
+        do_clear_color, should_clear_depth != 0, output_texture);
 
     // Create render pass state
     match render_pass::RenderPassState::new(
@@ -1603,8 +1529,9 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_begi
         device.queue_id(),
         color_view,
         depth_view,
-        should_clear_color != 0,
-        clear_color as u32,
+        output_texture, // Pass output texture for main framebuffer tracking
+        do_clear_color,
+        clear_color_argb,
         should_clear_depth != 0,
         clear_depth,
         clear_stencil as u32,
@@ -1722,7 +1649,10 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_draw
     base_vertex: jint,
     first_instance: jint,
 ) {
+    log::info!("NATIVE drawIndexed called: render_pass_ptr={}, indices={}", render_pass_ptr, index_count);
+
     if render_pass_ptr == 0 {
+        log::error!("NATIVE drawIndexed: render_pass_ptr is 0, returning early!");
         return;
     }
 
@@ -1736,7 +1666,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_draw
         first_instance as u32,
     );
 
-    log::debug!("Recorded drawIndexed (indices={}, instances={}, first={}, base={}, firstInst={})",
+    log::info!("NATIVE drawIndexed: Recorded draw (indices={}, instances={}, first={}, base={}, firstInst={})",
         index_count, instance_count, first_index, base_vertex, first_instance);
 }
 
@@ -1807,7 +1737,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_setS
 /// * `data` - The data to write (as byte array, must be 4-byte aligned)
 #[no_mangle]
 pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_setPushConstants(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
     _device_ptr: jlong,
     render_pass_ptr: jlong,
@@ -1856,14 +1786,25 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_endR
 
     // Take ownership of the boxed RenderPassState
     let mut state = unsafe { Box::from_raw(render_pass_ptr as *mut render_pass::RenderPassState) };
-    
-    // Finish and submit
-    if let Err(e) = state.finish_and_submit(device.context().as_ref(), device.queue_id()) {
-        log::error!("Failed to end render pass: {}", e);
-    } else {
-        log::debug!("Ended render pass at {:?}", render_pass_ptr as *const ());
+
+    // Finish and submit - returns the output texture that was rendered
+    match state.finish_and_submit(device.context().as_ref(), device.queue_id()) {
+        Ok(output_texture) => {
+            // Set the main framebuffer AFTER the render pass has successfully executed
+            // This fixes the race condition where present_frame could be called before rendering completes
+            if let Some(texture_id) = output_texture {
+                device.set_main_framebuffer(texture_id);
+                log::info!("endRenderPass: Set main framebuffer to {:?} after successful render", texture_id);
+            } else {
+                log::debug!("endRenderPass: No output texture from this render pass");
+            }
+            log::debug!("Ended render pass at {:?}", render_pass_ptr as *const ());
+        }
+        Err(e) => {
+            log::error!("Failed to end render pass: {}", e);
+        }
     }
-    
+
     // State is dropped here
 }
 
@@ -1880,7 +1821,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
     device_ptr: jlong,
     _render_pass_ptr: jlong,
     pipeline_handle: jlong,
-    texture_names: JObject,
+    _texture_names: JObject,
     texture_handles: JObject,
     sampler_handles: JObject,
     uniform_names: JObject,
@@ -1988,51 +1929,82 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
                     // Find the correct binding slot by matching the uniform name
                     // Use wgpu-mc style direct name matching
                     let binding_slot = if let Some(ref pipeline_info) = pipeline_layout {
+                        log::info!("Looking for binding slot for uniform '{}', pipeline has {} bindings",
+                                   mc_name, pipeline_info.binding_layouts.len());
+
                         // First try: exact variable name match (case insensitive)
                         let mut slot = pipeline_info.binding_layouts.iter()
                             .find(|layout| {
                                 if let Some(ref var_name) = layout.variable_name {
-                                    var_name.to_lowercase() == mc_name.to_lowercase() ||
-                                    var_name.replace("_", "").to_lowercase() == mc_name.to_lowercase()
+                                    let matches = var_name.to_lowercase() == mc_name.to_lowercase() ||
+                                        var_name.replace("_", "").to_lowercase() == mc_name.to_lowercase();
+                                    if matches {
+                                        log::info!("  Exact match found: '{}' == '{}'", var_name, mc_name);
+                                    }
+                                    matches
                                 } else {
                                     false
                                 }
                             })
                             .map(|layout| layout.binding);
-                        
-                        // Second try: use wgpu-mc style hardcoded mapping for common uniforms
-                        // This maps Minecraft uniform names to known binding slots
+
+                        // Second try: fuzzy matching for known uniforms
                         if slot.is_none() {
+                            log::info!("  No exact match, trying fuzzy match for '{}'", mc_name);
                             slot = match mc_name.as_str() {
-                                // Globals/matrices typically at binding 2 (after texture+sampler at 0,1)
+                                // For common uniforms, find matching uniform buffer by name patterns
+                                "Lighting" | "Projection" | "DynamicTransforms" | "Fog" |
+                                "ColorModulator" | "GameTime" | "ScreenSize" |
                                 "Globals" | "ModelViewMat" | "ProjMat" => {
-                                    // Find first uniform buffer binding
+                                    // Try to match by simplified names
+                                    let mc_lower = mc_name.to_lowercase();
+                                    let mc_simple = mc_lower
+                                        .replace("dynamic", "")
+                                        .replace("color", "")
+                                        .replace("modulator", "")
+                                        .replace("game", "")
+                                        .replace("screen", "");
+
                                     pipeline_info.binding_layouts.iter()
-                                        .find(|l| l.ty == crate::resource_handles::BindingLayoutType::UniformBuffer)
+                                        .find(|l| {
+                                            if l.ty != crate::resource_handles::BindingLayoutType::UniformBuffer {
+                                                return false;
+                                            }
+                                            if let Some(ref var_name) = l.variable_name {
+                                                let var_lower = var_name.to_lowercase();
+                                                let matches = var_lower == mc_simple ||
+                                                    var_lower.contains(&mc_simple) ||
+                                                    mc_lower.contains(&var_lower);
+                                                if matches {
+                                                    log::info!("  Fuzzy match: '{}' ~= '{}' (base: '{}')",
+                                                               var_name, mc_name, mc_simple);
+                                                }
+                                                matches
+                                            } else {
+                                                false
+                                            }
+                                        })
                                         .map(|l| l.binding)
-                                }
-                                // These uniforms are often not needed by simple shaders
-                                "Lighting" | "Projection" | "DynamicTransforms" | "Fog" | 
-                                "ColorModulator" | "GameTime" | "ScreenSize" => {
-                                    // Skip silently - shader may not use these
-                                    None
                                 }
                                 _ => None,
                             };
                         }
+
+                        if slot.is_none() {
+                            log::warn!("No binding slot found for uniform '{}' (pipeline has {} bindings)",
+                                       mc_name, pipeline_info.binding_layouts.len());
+                        }
+
                         slot
                     } else {
                         None
                     };
 
                     if let Some(slot) = binding_slot {
-                        log::debug!("Mapping uniform '{}' to binding slot {}", mc_name, slot);
+                        log::info!("Mapping uniform '{}' to binding slot {}", mc_name, slot);
                         builder = builder.add_uniform_buffer(slot, buffer_info.id, 0, buffer_info.size);
                     } else {
-                        // Only warn for uniforms we don't recognize
-                        if !matches!(mc_name.as_str(), "Lighting" | "Projection" | "DynamicTransforms" | "Fog" | "ColorModulator" | "GameTime" | "ScreenSize") {
-                            log::warn!("No binding slot found for uniform '{}'", mc_name);
-                        }
+                        log::warn!("Failed to map uniform '{}' to any binding slot", mc_name);
                     }
                 }
             }
@@ -2056,7 +2028,9 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
                     return handle as jlong;
                 }
                 Err(e) => {
-                    log::error!("Failed to create empty bind group: {:?}", e);
+                    let msg = format!("Failed to create empty bind group: {:?}", e);
+                    log::error!("{}", msg);
+                    let _ = env.throw_new("java/lang/RuntimeException", &msg);
                     return 0;
                 }
             }
@@ -2122,9 +2096,10 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
             handle as jlong
         }
         Err(e) => {
-            // Don't crash - just log and return 0
-            // The draw call will be skipped if bind group is missing
-            log::warn!("Failed to create bind group: {:?}", e);
+            // This is a critical failure - bind group creation failed
+            let msg = format!("Failed to create bind group: {:?}", e);
+            log::error!("{}", msg);
+            let _ = env.throw_new("java/lang/RuntimeException", &msg);
             0
         }
     }
@@ -2143,7 +2118,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
     device_ptr: jlong,
     _render_pass_ptr: jlong,
     pipeline_handle: jlong,
-    texture_names: JObject<'local>,
+    _texture_names: JObject<'local>,
     texture_handles: JObject<'local>,
     sampler_handles: JObject<'local>,
     uniform_names: JObject<'local>,
@@ -2162,9 +2137,6 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
     let context = device.context().clone();
     let device_id = device.id();
 
-    // We'll create up to 3 bind groups (indices 0, 1, 2)
-    let mut bind_group_handles: [jlong; 3] = [0, 0, 0];
-
     // Get pipeline's bind group layout if pipeline handle is provided
     let pipeline_layout = if pipeline_handle != 0 {
         HANDLES.get_render_pipeline_info(pipeline_handle as u64)
@@ -2172,117 +2144,9 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
         None
     };
 
-    // === GROUP 0: Textures and Samplers ===
-    {
-        let mut builder = bind_group::BindGroupBuilder::new(context.clone(), device_id);
-        let mut texture_binding_slot: u32 = 0;
-
-        // Add texture bindings
-        if !texture_handles.is_null() && !sampler_handles.is_null() {
-            let tex_array: ::jni::objects::JPrimitiveArray<i64> = texture_handles.into();
-            let samp_array: ::jni::objects::JPrimitiveArray<i64> = sampler_handles.into();
-
-            let texture_count = match env.get_array_length(&tex_array) {
-                Ok(len) => len as usize,
-                Err(_) => 0,
-            };
-
-            for i in 0..texture_count {
-                let mut tex_handle_buf = [0i64; 1];
-                if env.get_long_array_region(&tex_array, i as i32, &mut tex_handle_buf).is_ok() {
-                    let tex_handle = tex_handle_buf[0];
-                    if tex_handle == 0 {
-                        continue;
-                    }
-
-                    if let Some(view_info) = HANDLES.get_texture_view_info(tex_handle as u64) {
-                        let mut samp_handle_buf = [0i64; 1];
-                        let sampler_id = if env.get_long_array_region(&samp_array, i as i32, &mut samp_handle_buf).is_ok() {
-                            let samp_handle = samp_handle_buf[0];
-                            if samp_handle != 0 {
-                                HANDLES.get_sampler(samp_handle as u64)
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        };
-
-                        builder = builder.add_texture(texture_binding_slot, view_info.id, sampler_id, view_info.dimension, view_info.texture_id);
-                        texture_binding_slot += if sampler_id.is_some() { 2 } else { 1 };
-                    }
-                }
-            }
-        }
-
-        // Check if pipeline expects textures in group 0 and get expected dimension
-        let (pipeline_expects_textures, expected_texture_dim) = if let Some(ref info) = pipeline_layout {
-            let texture_entry = info.binding_layouts.iter()
-                .find(|e| e.ty == resource_handles::BindingLayoutType::Texture);
-            (texture_entry.is_some(), texture_entry.and_then(|e| e.expected_dimension))
-        } else {
-            (texture_binding_slot > 0, None) // Fall back to checking if we have textures
-        };
-        
-        // Get the pipeline's group 0 layout
-        let group0_layout = if let Some(ref info) = pipeline_layout {
-            info.bind_group_layout_ids.first().copied()
-        } else {
-            None
-        };
-        
-        if pipeline_expects_textures && texture_binding_slot > 0 {
-            // Pipeline expects textures and we have them - create texture bind group
-            let layout_id = group0_layout.or_else(|| 
-                device.bind_group_layouts.get(bind_group_layouts::BindGroupLayoutType::TextureSampler)
-            );
-            
-            // Use pipeline's expected dimension, or fall back to D2
-            let texture_dimension = expected_texture_dim.unwrap_or(wgt::TextureViewDimension::D2);
-            log::info!("Creating bind group 0 with texture dimension {:?}", texture_dimension);
-            
-            if let Some(layout_id) = layout_id {
-                let result = builder.build_with_layout(
-                    layout_id,
-                    &[
-                        resource_handles::BindingLayoutEntry {
-                            binding: 0,
-                            ty: resource_handles::BindingLayoutType::Texture,
-                            variable_name: Some("Sampler0".to_string()),
-                            min_binding_size: None,
-                            expected_dimension: Some(texture_dimension),
-                        },
-                        resource_handles::BindingLayoutEntry {
-                            binding: 1,
-                            ty: resource_handles::BindingLayoutType::Sampler,
-                            variable_name: Some("Sampler0Sampler".to_string()),
-                            min_binding_size: None,
-                            expected_dimension: None,
-                        },
-                    ]
-                );
-
-                if let Ok(bind_group_id) = result {
-                    let handle = HANDLES.insert_bind_group(bind_group_id);
-                    bind_group_handles[0] = handle as jlong;
-                    log::info!("Created bind group 0 (textures) with handle {}", handle);
-                }
-            }
-        } else if !pipeline_expects_textures {
-            // Pipeline doesn't expect textures - use the pipeline's own group 0 layout (which might be empty)
-            if let Some(layout_id) = group0_layout {
-                let empty_builder = bind_group::BindGroupBuilder::new(context.clone(), device_id);
-                if let Ok(bind_group_id) = empty_builder.build_with_layout(layout_id, &[]) {
-                    let handle = HANDLES.insert_bind_group(bind_group_id);
-                    bind_group_handles[0] = handle as jlong;
-                    log::info!("Created empty bind group 0 (pipeline has no textures) with handle {}", handle);
-                }
-            }
-        }
-    }
-
-    // === GROUP 1: DynamicTransforms uniform ===
-    if !uniform_handles.is_null() && !uniform_names.is_null() && !uniform_offsets.is_null() && !uniform_sizes.is_null() {
+    // Collect all uniforms upfront to avoid moving JNI objects multiple times
+    // Each entry: (name, buffer_id, offset, size)
+    let collected_uniforms: Vec<(String, wgpu_core::id::BufferId, u64, u64)> = if !uniform_handles.is_null() && !uniform_names.is_null() && !uniform_offsets.is_null() && !uniform_sizes.is_null() {
         let unif_array: ::jni::objects::JPrimitiveArray<i64> = uniform_handles.into();
         let names_array: ::jni::objects::JObjectArray = uniform_names.into();
         let offsets_array: ::jni::objects::JPrimitiveArray<i64> = uniform_offsets.into();
@@ -2293,19 +2157,16 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
             Err(_) => 0,
         };
 
-        // Look for DynamicTransforms uniform (or similar names)
+        let mut uniforms = Vec::new();
         for i in 0..uniform_count {
             let mut unif_handle_buf = [0i64; 1];
             let mut offset_buf = [0i64; 1];
             let mut size_buf = [0i64; 1];
-            
-            if env.get_long_array_region(&unif_array, i as i32, &mut unif_handle_buf).is_ok() 
+
+            if env.get_long_array_region(&unif_array, i as i32, &mut unif_handle_buf).is_ok()
                && env.get_long_array_region(&offsets_array, i as i32, &mut offset_buf).is_ok()
                && env.get_long_array_region(&sizes_array, i as i32, &mut size_buf).is_ok() {
                 let unif_handle = unif_handle_buf[0];
-                let unif_offset = offset_buf[0] as u64;
-                let unif_size = size_buf[0] as u64;
-                
                 if unif_handle == 0 {
                     continue;
                 }
@@ -2325,141 +2186,218 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
                 };
 
                 if let (Some(buffer_info), Some(mc_name)) = (HANDLES.get_buffer_info(unif_handle as u64), uniform_name) {
-                    // Use slice size if provided, otherwise use full buffer size
-                    let actual_size = if unif_size > 0 { unif_size } else { buffer_info.size };
-                    
-                    // Log uniform info for debugging
-                    let num_layouts = pipeline_layout.as_ref().map(|p| p.bind_group_layout_ids.len()).unwrap_or(0);
-                    log::debug!("Processing uniform '{}' size={}, pipeline has {} bind group layouts", mc_name, actual_size, num_layouts);
-                    
-                    // Check if this is a DynamicTransforms-like uniform (Group 1)
-                    // Note: "Globals" is a separate 56-byte uniform, NOT DynamicTransforms (160 bytes)
-                    let is_group1 = mc_name == "DynamicTransforms" || 
-                                    mc_name == "ModelViewMat";
-                    
-                    // Only try to create group 1 if the pipeline actually expects it (has 2+ bind groups)
-                    let pipeline_expects_group1 = pipeline_layout.as_ref()
-                        .map(|info| info.bind_group_layout_ids.len() >= 2)
-                        .unwrap_or(false);
-                    
-                    if is_group1 && bind_group_handles[1] == 0 && pipeline_expects_group1 {
-                        // Use pipeline's bind group layout for group 1 (has correct min_binding_size)
-                        let layout_id = if let Some(ref info) = pipeline_layout {
-                            info.bind_group_layout_ids.get(1).copied()
-                        } else {
-                            device.bind_group_layouts.get(bind_group_layouts::BindGroupLayoutType::Uniform)
-                        };
-                        
-                        if let Some(layout_id) = layout_id {
-                            let mut builder = bind_group::BindGroupBuilder::new(context.clone(), device_id);
-                            builder = builder.add_uniform_buffer(0, buffer_info.id, unif_offset, actual_size);
-                            
-                            let result = builder.build_with_layout(
-                                layout_id,
-                                &[resource_handles::BindingLayoutEntry {
-                                    binding: 0,
-                                    ty: resource_handles::BindingLayoutType::UniformBuffer,
-                                    variable_name: Some("uniforms".to_string()),
-                                    min_binding_size: Some(actual_size),
-                                    expected_dimension: None,
-                                }]
-                            );
+                    let actual_size = if size_buf[0] > 0 { size_buf[0] as u64 } else { buffer_info.size };
+                    uniforms.push((mc_name, buffer_info.id, offset_buf[0] as u64, actual_size));
+                }
+            }
+        }
+        uniforms
+    } else {
+        Vec::new()
+    };
 
-                            if let Ok(bind_group_id) = result {
-                                let handle = HANDLES.insert_bind_group(bind_group_id);
-                                bind_group_handles[1] = handle as jlong;
-                                log::info!("Created bind group 1 (DynamicTransforms) from '{}' offset={} size={} with handle {}", mc_name, unif_offset, actual_size, handle);
-                            } else {
-                                log::warn!("Failed to create bind group 1 (DynamicTransforms) from '{}': {:?}", mc_name, result);
-                            }
-                        } else {
-                            log::warn!("No bind group layout found for group 1 (DynamicTransforms)");
-                        }
-                    }
-                    
-                    // Check if this is a Projection uniform (Group 2)
-                    let is_group2 = mc_name == "Projection" || mc_name == "ProjMat";
-                    
-                    // Only try to create group 2 if the pipeline actually expects it (has 3+ bind groups)
-                    let pipeline_expects_group2 = pipeline_layout.as_ref()
-                        .map(|info| info.bind_group_layout_ids.len() >= 3)
-                        .unwrap_or(false);
-                    
-                    if is_group2 && bind_group_handles[2] == 0 && pipeline_expects_group2 {
-                        // Use pipeline's bind group layout for group 2 (has correct min_binding_size)
-                        let layout_id = if let Some(ref info) = pipeline_layout {
-                            info.bind_group_layout_ids.get(2).copied()
-                        } else {
-                            device.bind_group_layouts.get(bind_group_layouts::BindGroupLayoutType::Uniform)
-                        };
-                        
-                        if let Some(layout_id) = layout_id {
-                            let mut builder = bind_group::BindGroupBuilder::new(context.clone(), device_id);
-                            builder = builder.add_uniform_buffer(0, buffer_info.id, unif_offset, actual_size);
-                            
-                            let result = builder.build_with_layout(
-                                layout_id,
-                                &[resource_handles::BindingLayoutEntry {
-                                    binding: 0,
-                                    ty: resource_handles::BindingLayoutType::UniformBuffer,
-                                    variable_name: Some("projection".to_string()),
-                                    min_binding_size: Some(actual_size),
-                                    expected_dimension: None,
-                                }]
-                            );
+    log::info!("Collected {} uniforms for bind group creation", collected_uniforms.len());
 
-                            if let Ok(bind_group_id) = result {
-                                let handle = HANDLES.insert_bind_group(bind_group_id);
-                                bind_group_handles[2] = handle as jlong;
-                                log::info!("Created bind group 2 (Projection) from '{}' offset={} size={} with handle {}", mc_name, unif_offset, actual_size, handle);
-                            } else {
-                                log::warn!("Failed to create bind group 2 (Projection) from '{}' with error: {:?}", mc_name, result);
-                            }
+    // Determine how many groups the pipeline expects
+    let num_groups = if let Some(ref info) = pipeline_layout {
+        info.bind_group_layout_ids.len()
+    } else {
+        1  // Default to at least group 0
+    };
+
+    // Resize bind_group_handles to match the number of groups (min 3 for backwards compatibility)
+    let mut bind_group_handles: Vec<jlong> = vec![0; num_groups.max(3)];
+
+    log::info!("Pipeline expects {} bind groups, creating bind groups for all of them", num_groups);
+
+    // Collect textures once (textures always go in GROUP 0 in our current design)
+    let mut texture_entries: Vec<(u32, wgpu_core::id::TextureViewId, Option<wgpu_core::id::SamplerId>, wgpu_types::TextureViewDimension, wgpu_core::id::TextureId)> = Vec::new();
+    let mut texture_binding_slot: u32 = 0;
+
+    if !texture_handles.is_null() && !sampler_handles.is_null() {
+        let tex_array: ::jni::objects::JPrimitiveArray<i64> = texture_handles.into();
+        let samp_array: ::jni::objects::JPrimitiveArray<i64> = sampler_handles.into();
+
+        let texture_count = match env.get_array_length(&tex_array) {
+            Ok(len) => len as usize,
+            Err(_) => 0,
+        };
+
+        for i in 0..texture_count {
+            let mut tex_handle_buf = [0i64; 1];
+            if env.get_long_array_region(&tex_array, i as i32, &mut tex_handle_buf).is_ok() {
+                let tex_handle = tex_handle_buf[0];
+                if tex_handle == 0 {
+                    continue;
+                }
+
+                if let Some(view_info) = HANDLES.get_texture_view_info(tex_handle as u64) {
+                    let mut samp_handle_buf = [0i64; 1];
+                    let sampler_id = if env.get_long_array_region(&samp_array, i as i32, &mut samp_handle_buf).is_ok() {
+                        let samp_handle = samp_handle_buf[0];
+                        if samp_handle != 0 {
+                            HANDLES.get_sampler(samp_handle as u64)
                         } else {
-                            log::warn!("Failed to get bind group layout for Projection uniform (pipeline expects group 2 but layout not found)");
+                            None
                         }
-                    }
+                    } else {
+                        None
+                    };
+
+                    texture_entries.push((texture_binding_slot, view_info.id, sampler_id, view_info.dimension, view_info.texture_id));
+                    texture_binding_slot += if sampler_id.is_some() { 2 } else { 1 };
                 }
             }
         }
     }
 
-    // Ensure ALL required bind groups are created (even empty ones) for pipeline compatibility
-    // If pipeline has bind group layouts but we didn't create bind groups, create empty ones
-    if let Some(ref info) = pipeline_layout {
-        for (group_idx, layout_id) in info.bind_group_layout_ids.iter().enumerate() {
-            if bind_group_handles[group_idx] == 0 {
-                // Create empty bind group for this index
-                let empty_desc = wgpu_core::binding_model::BindGroupDescriptor {
-                    label: Some(Cow::Borrowed("Empty Bind Group")),
-                    layout: *layout_id,
-                    entries: Cow::Owned(vec![]),
-                };
-                
-                let (empty_bg_id, err) = context.inner().device_create_bind_group(
-                    device_id,
-                    &empty_desc,
-                    None,
-                );
-                
-                if err.is_none() {
-                    let handle = HANDLES.insert_bind_group(empty_bg_id);
+    // === Process ALL bind groups ===
+    for group_idx in 0..num_groups {
+        let group_idx_u32 = group_idx as u32;
+
+        // Get the layout for this group
+        let group_layout = if let Some(ref info) = pipeline_layout {
+            info.bind_group_layout_ids.get(group_idx).copied()
+        } else {
+            None
+        };
+
+        // Filter binding_layouts for this group only
+        let group_binding_layouts: Vec<resource_handles::BindingLayoutEntry> = if let Some(ref info) = pipeline_layout {
+            info.binding_layouts.iter()
+                .filter(|e| e.group == group_idx_u32)
+                .cloned()
+                .collect()
+        } else {
+            vec![]
+        };
+
+        log::info!("GROUP {}: {} bindings expected", group_idx, group_binding_layouts.len());
+
+        // Skip if no layout and no bindings
+        if group_layout.is_none() && group_binding_layouts.is_empty() {
+            log::debug!("GROUP {}: No layout or bindings, skipping", group_idx);
+            continue;
+        }
+
+        let Some(layout_id) = group_layout else {
+            log::warn!("GROUP {}: Has binding layouts but no layout ID, skipping", group_idx);
+            continue;
+        };
+
+        let mut builder = bind_group::BindGroupBuilder::new(context.clone(), device_id);
+
+        // Add texture bindings (only for GROUP 0)
+        if group_idx == 0 && !texture_entries.is_empty() {
+            for (slot, view_id, sampler_id, dimension, texture_id) in &texture_entries {
+                builder = builder.add_texture(*slot, *view_id, *sampler_id, *dimension, *texture_id);
+            }
+            log::info!("GROUP 0: Added {} texture/sampler bindings", texture_entries.len());
+        }
+
+        // Add uniform bindings for this group
+        // Match uniforms to binding_layouts for this specific group
+        let mut uniforms_added = 0;
+        for (mc_name, buffer_id, unif_offset, actual_size) in &collected_uniforms {
+            // Try to match this uniform to a binding slot in THIS group
+            let binding_slot = if let Some(ref pipeline_info) = pipeline_layout {
+                let mc_name_lower: String = mc_name.to_lowercase();
+
+                // First try: exact variable name match in THIS GROUP
+                let mut slot = pipeline_info.binding_layouts.iter()
+                    .filter(|e| e.group == group_idx_u32)
+                    .find(|layout| {
+                        if layout.ty != resource_handles::BindingLayoutType::UniformBuffer {
+                            return false;
+                        }
+                        if let Some(ref var_name) = layout.variable_name {
+                            let var_lower: String = var_name.to_lowercase();
+                            var_lower == mc_name_lower ||
+                            var_lower.replace("_", "") == mc_name_lower
+                        } else {
+                            false
+                        }
+                    })
+                    .map(|layout| layout.binding);
+
+                // Second try: fuzzy matching for known uniforms in THIS GROUP
+                if slot.is_none() {
+                    let mc_simple = mc_name_lower
+                        .replace("dynamic", "")
+                        .replace("color", "")
+                        .replace("modulator", "")
+                        .replace("game", "")
+                        .replace("screen", "");
+
+                    slot = pipeline_info.binding_layouts.iter()
+                        .filter(|e| e.group == group_idx_u32)
+                        .find(|l| {
+                            if l.ty != resource_handles::BindingLayoutType::UniformBuffer {
+                                return false;
+                            }
+                            if let Some(ref var_name) = l.variable_name {
+                                let var_lower: String = var_name.to_lowercase();
+                                var_lower == mc_simple ||
+                                var_lower.contains(&mc_simple) ||
+                                mc_name_lower.contains(&var_lower)
+                            } else {
+                                false
+                            }
+                        })
+                        .map(|l| l.binding);
+                }
+
+                slot
+            } else {
+                None
+            };
+
+            if let Some(slot) = binding_slot {
+                log::info!("GROUP {}: Mapping uniform '{}' to binding slot {} (size={})",
+                           group_idx, mc_name, slot, actual_size);
+                builder = builder.add_uniform_buffer(slot, *buffer_id, *unif_offset, *actual_size);
+                uniforms_added += 1;
+            }
+        }
+
+        log::info!("GROUP {}: Added {} uniform bindings", group_idx, uniforms_added);
+
+        // Check if this group expects resources
+        let pipeline_expects_resources = !group_binding_layouts.is_empty();
+
+        // Create bind group for this group
+        if pipeline_expects_resources || (group_idx == 0 && !texture_entries.is_empty()) || uniforms_added > 0 {
+            // Use the pipeline's binding_layouts (already filtered for this group)
+            let result = builder.build_with_layout(layout_id, &group_binding_layouts);
+
+            if let Ok(bind_group_id) = result {
+                let handle = HANDLES.insert_bind_group(bind_group_id);
+                if group_idx < bind_group_handles.len() {
                     bind_group_handles[group_idx] = handle as jlong;
-                    log::info!("Created empty bind group {} with handle {}", group_idx, handle);
-                } else {
-                    log::warn!("Failed to create empty bind group {}: {:?}", group_idx, err);
+                }
+                log::info!("GROUP {}: Created bind group with handle {}", group_idx, handle);
+            } else {
+                log::warn!("GROUP {}: Failed to create bind group: {:?}", group_idx, result);
+                // For non-critical groups (not group 0), we continue anyway
+                if group_idx == 0 {
+                    log::error!("GROUP 0 is critical, cannot continue without it");
+                    let msg = format!("createMultiBindGroups: failed to create GROUP 0 bind group: {:?}", result);
+                    let _ = env.throw_new("java/lang/RuntimeException", &msg);
+                    return 0;
                 }
             }
+        } else {
+            log::debug!("GROUP {}: No resources to bind and pipeline doesn't expect any, skipping", group_idx);
         }
     }
 
-    log::info!("createMultiBindGroups: created [{}, {}, {}]", 
-        bind_group_handles[0], bind_group_handles[1], bind_group_handles[2]);
-    
+    log::info!("createMultiBindGroups: created {} bind groups: {:?}",
+        num_groups, bind_group_handles);
+
     // Set bind groups on the render pass directly
     if _render_pass_ptr != 0 {
         let state = unsafe { &mut *(_render_pass_ptr as *mut render_pass::RenderPassState) };
-        
+
         for (group_index, &handle) in bind_group_handles.iter().enumerate() {
             if handle != 0 {
                 if let Some(bind_group_id) = HANDLES.get_bind_group(handle as u64) {
@@ -2469,28 +2407,19 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
             }
         }
     }
-    
-    // Return success only if ALL required bind groups were created
-    // If pipeline has N bind group layouts, all N must be created
-    if let Some(ref info) = pipeline_layout {
-        let required_count = info.bind_group_layout_ids.len();
-        let created_count = bind_group_handles.iter().take(required_count).filter(|&&h| h != 0).count();
-        
-        if created_count < required_count {
-            log::warn!("createMultiBindGroups: only created {}/{} required bind groups, returning 0", 
-                created_count, required_count);
-            return 0;
-        }
+
+    // Validate that at least GROUP 0 was created
+    if bind_group_handles[0] == 0 {
+        let msg = "createMultiBindGroups: failed to create GROUP 0 (primary bind group)".to_string();
+        log::error!("{}", msg);
+        let _ = env.throw_new("java/lang/RuntimeException", &msg);
+        return 0;
     }
-    
-    // Return first non-zero handle as indicator of success
-    if bind_group_handles[0] != 0 {
-        bind_group_handles[0]
-    } else if bind_group_handles[1] != 0 {
-        bind_group_handles[1]
-    } else {
-        bind_group_handles[2]
-    }
+
+    log::info!("createMultiBindGroups: Successfully created bind groups for multi-group pipeline");
+
+    // Return GROUP 0 handle as the primary result
+    bind_group_handles[0]
 }
 
 /// Set a bind group on the render pass

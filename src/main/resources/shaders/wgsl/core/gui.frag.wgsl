@@ -1,4 +1,6 @@
 // GUI fragment shader - solid color rendering
+//
+// All bindings in group 0 to match Bassalt's single bind group approach
 
 struct DynamicTransforms {
     ModelViewMat: mat4x4<f32>,
@@ -8,13 +10,13 @@ struct DynamicTransforms {
     TextureMat: mat4x4<f32>,
 }
 
-@group(1) @binding(0) var<uniform> transforms: DynamicTransforms;
+// Group 0 bindings
+@group(0) @binding(4) var<uniform> transforms: DynamicTransforms;
 
 @fragment
 fn main(@location(0) vertex_color: vec4<f32>) -> @location(0) vec4<f32> {
-    var color = vertex_color;
-    if (color.a == 0.0) {
+    if (vertex_color.a == 0.0) {
         discard;
     }
-    return color * transforms.ColorModulator;
+    return vertex_color * transforms.ColorModulator;
 }

@@ -1,7 +1,6 @@
 //! Command encoding utilities
 
 use wgpu_core::id;
-use wgpu_types as wgt;
 
 /// Command encoder wrapper
 pub struct CommandEncoder {

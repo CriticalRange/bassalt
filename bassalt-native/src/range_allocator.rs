@@ -72,7 +72,7 @@ impl BufferPool {
     pub fn new(
         context: Arc<BasaltContext>,
         device_id: id::DeviceId,
-        queue_id: id::QueueId,
+        _queue_id: id::QueueId,
         size: u64,
         usage: wgt::BufferUsages,
         alignment: u64,
@@ -127,7 +127,7 @@ impl BufferPool {
 
         // Try to allocate
         let range = allocator.allocate_range(aligned_size).map_err(|_| {
-            BasaltError::OutOfMemory(format!(
+            BasaltError::out_of_memory(format!(
                 "Buffer pool exhausted: requested {} bytes, total {} bytes",
                 aligned_size, self.total_size
             ))
@@ -158,7 +158,8 @@ impl BufferPool {
     /// Free a previously allocated range
     pub fn free(&self, handle: AllocationHandle) -> Result<()> {
         let info = self.allocations.write().remove(&handle.id())
-            .ok_or_else(|| BasaltError::InvalidParameter(
+            .ok_or_else(|| BasaltError::invalid_parameter(
+                "handle",
                 format!("Invalid allocation handle: {}", handle.id())
             ))?;
 
@@ -180,15 +181,16 @@ impl BufferPool {
     /// Write data to an allocation
     pub fn write(&self, queue_id: id::QueueId, handle: AllocationHandle, data: &[u8]) -> Result<()> {
         let info = self.allocations.read().get(&handle.id()).cloned()
-            .ok_or_else(|| BasaltError::InvalidParameter(
+            .ok_or_else(|| BasaltError::invalid_parameter(
+                "handle",
                 format!("Invalid allocation handle: {}", handle.id())
             ))?;
 
         if data.len() as u64 > info.size {
-            return Err(BasaltError::InvalidParameter(format!(
-                "Data size {} exceeds allocation size {}",
-                data.len(), info.size
-            )));
+            return Err(BasaltError::invalid_parameter(
+                "data_size",
+                format!("Data size {} exceeds allocation size {}", data.len(), info.size)
+            ));
         }
 
         self.context
@@ -216,7 +218,7 @@ impl BufferPool {
 
     /// Get the amount of free space available
     pub fn free_space(&self) -> u64 {
-        let allocator = self.allocator.read();
+        let _allocator = self.allocator.read();
         // Sum up all free ranges
         self.total_size - self.allocations.read().values().map(|a| a.size).sum::<u64>()
     }
@@ -382,9 +384,10 @@ impl BufferPoolManager {
                 let info = p.get_info(handle).unwrap();
                 Ok((handle, info.buffer_id, info.offset))
             }
-            None => Err(BasaltError::InvalidParameter(format!(
-                "No pool available for usage {:?}", usage
-            ))),
+            None => Err(BasaltError::invalid_parameter(
+                "usage",
+                format!("No pool available for usage {:?}", usage)
+            )),
         }
     }
 
@@ -404,9 +407,10 @@ impl BufferPoolManager {
 
         match pool {
             Some(p) => p.write(self.queue_id, handle, data),
-            None => Err(BasaltError::InvalidParameter(format!(
-                "No pool available for usage {:?}", usage
-            ))),
+            None => Err(BasaltError::invalid_parameter(
+                "usage",
+                format!("No pool available for usage {:?}", usage)
+            )),
         }
     }
 
@@ -426,9 +430,10 @@ impl BufferPoolManager {
 
         match pool {
             Some(p) => p.free(handle),
-            None => Err(BasaltError::InvalidParameter(format!(
-                "No pool available for usage {:?}", usage
-            ))),
+            None => Err(BasaltError::invalid_parameter(
+                "usage",
+                format!("No pool available for usage {:?}", usage)
+            )),
         }
     }
 }

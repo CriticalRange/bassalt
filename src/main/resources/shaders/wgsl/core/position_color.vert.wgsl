@@ -1,7 +1,6 @@
 // Position-Color vertex shader
-// Uniform layout:
-// Group 1: DynamicTransforms
-// Group 2: Projection
+//
+// All bindings in group 0 to match Bassalt's single bind group approach
 
 struct DynamicTransforms {
     ModelViewMat: mat4x4<f32>,
@@ -15,8 +14,9 @@ struct Projection {
     ProjMat: mat4x4<f32>,
 }
 
-@group(1) @binding(0) var<uniform> transforms: DynamicTransforms;
-@group(2) @binding(0) var<uniform> projection: Projection;
+// Group 0 bindings
+@group(0) @binding(4) var<uniform> transforms: DynamicTransforms;
+@group(0) @binding(5) var<uniform> projection: Projection;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -32,6 +32,6 @@ struct VertexOutput {
 fn main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.position = projection.ProjMat * transforms.ModelViewMat * vec4<f32>(in.position, 1.0);
-    out.vertex_color = in.color * transforms.ColorModulator;
+    out.vertex_color = in.color;
     return out;
 }

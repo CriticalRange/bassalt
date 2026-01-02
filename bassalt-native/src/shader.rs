@@ -15,7 +15,11 @@ pub fn glsl_to_wgsl(glsl_source: &str, stage: ShaderStage) -> Result<String> {
 
     let module = frontend
         .parse(&glsl_options, glsl_source)
-        .map_err(|e| BasaltError::ShaderCompilation(format!("GLSL parse error: {:?}", e)))?;
+        .map_err(|e| BasaltError::shader_compilation(
+            "glsl_to_wgsl",
+            format!("GLSL parse error: {:?}", e),
+            format!("{:?}", stage),
+        ))?;
 
     // Validate the module
     let mut validator = valid::Validator::new(
@@ -25,11 +29,18 @@ pub fn glsl_to_wgsl(glsl_source: &str, stage: ShaderStage) -> Result<String> {
 
     let module_info = validator
         .validate(&module)
-        .map_err(|e| BasaltError::ShaderValidation(format!("Validation error: {:?}", e)))?;
+        .map_err(|e| BasaltError::ShaderValidation {
+            shader_name: "glsl_to_wgsl".to_string(),
+            error: format!("Validation error: {:?}", e),
+        })?;
 
     // Write to WGSL with WriterFlags
     let wgsl = back::wgsl::write_string(&module, &module_info, back::wgsl::WriterFlags::empty())
-        .map_err(|e| BasaltError::ShaderCompilation(format!("WGSL generation error: {}", e)))?;
+        .map_err(|e| BasaltError::shader_compilation(
+            "glsl_to_wgsl",
+            format!("WGSL generation error: {}", e),
+            "wgsl_write",
+        ))?;
 
     Ok(wgsl)
 }
@@ -44,7 +55,11 @@ pub fn glsl_to_module(glsl_source: &str, stage: ShaderStage) -> Result<Module> {
 
     let module = frontend
         .parse(&glsl_options, glsl_source)
-        .map_err(|e| BasaltError::ShaderCompilation(format!("GLSL parse error: {:?}", e)))?;
+        .map_err(|e| BasaltError::shader_compilation(
+            "glsl_to_module",
+            format!("GLSL parse error: {:?}", e),
+            format!("{:?}", stage),
+        ))?;
 
     // Validate the module
     let mut validator = valid::Validator::new(
@@ -54,7 +69,10 @@ pub fn glsl_to_module(glsl_source: &str, stage: ShaderStage) -> Result<Module> {
 
     let _module_info = validator
         .validate(&module)
-        .map_err(|e| BasaltError::ShaderValidation(format!("Validation error: {:?}", e)))?;
+        .map_err(|e| BasaltError::ShaderValidation {
+            shader_name: "glsl_to_module".to_string(),
+            error: format!("Validation error: {:?}", e),
+        })?;
 
     Ok(module)
 }
@@ -62,7 +80,11 @@ pub fn glsl_to_module(glsl_source: &str, stage: ShaderStage) -> Result<Module> {
 /// Compile WGSL directly to a module
 pub fn parse_wgsl(wgsl_source: &str) -> Result<Module> {
     front::wgsl::parse_str(&wgsl_source).map_err(|e| {
-        BasaltError::ShaderCompilation(format!("WGSL parse error: {:?}", e))
+        BasaltError::ShaderParse {
+            error: e.to_string(),
+            line: None,
+            column: None,
+        }
     })
 }
 
@@ -72,10 +94,9 @@ pub fn parse_shader_stage(stage: &str) -> Result<ShaderStage> {
         "vertex" | "vs" => Ok(ShaderStage::Vertex),
         "fragment" | "fs" | "pixel" | "ps" => Ok(ShaderStage::Fragment),
         "compute" | "cs" => Ok(ShaderStage::Compute),
-        _ => Err(BasaltError::InvalidParameter(format!(
-            "Unknown shader stage: {}",
-            stage
-        ))),
+        _ => Err(BasaltError::invalid_parameter(
+            "stage",
+            format!("Unknown shader stage: {}", stage),
+        )),
     }
 }
-
