@@ -259,7 +259,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltLogger_init
 /// JNI function to retrieve stored debug messages
 /// Returns an array of strings in format "[LEVEL] message"
 #[no_mangle]
-pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_getLastDebugMessages<'local>(
+pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_getLastDebugMessagesNative<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> JObjectArray<'local> {
