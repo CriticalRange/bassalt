@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use wgpu_core::id;
 use wgpu_core::pipeline;
 use wgpu_types as wgt;
@@ -16,10 +17,52 @@ use crate::bind_group_layouts::{BindGroupLayouts, SharedLayoutCache};
 /// Current swapchain state (for lock-free updates)
 #[derive(Debug, Clone)]
 struct SwapchainState {
-    current_texture: Option<id::TextureId>,
     main_framebuffer: Option<id::TextureId>,
     width: u32,
     height: u32,
+}
+
+/// Frame-in-flight tracking for proper frame synchronization
+///
+/// Based on best practices from NVIDIA, Vulkan, and DirectX 12:
+/// - 2 frames in flight with 3 swapchain images (triple buffering)
+/// - Formula: swapchain_images = frames_in_flight + 1
+struct FrameTracker {
+    /// Number of frames currently submitted to GPU
+    frames_in_flight: AtomicUsize,
+    /// Maximum frames allowed before waiting (triple buffering standard)
+    max_frames_in_flight: usize,
+}
+
+impl FrameTracker {
+    fn new() -> Self {
+        Self {
+            frames_in_flight: AtomicUsize::new(0),
+            max_frames_in_flight: 2, // Triple buffering standard
+        }
+    }
+
+    /// Increment frame counter (called when submitting work)
+    fn increment(&self) {
+        let count = self.frames_in_flight.fetch_add(1, Ordering::Relaxed) + 1;
+        log::debug!("Frame tracker: {} frames in flight (max: {})", count, self.max_frames_in_flight);
+    }
+
+    /// Decrement frame counter (called when frame completes)
+    fn decrement(&self) {
+        let count = self.frames_in_flight.fetch_sub(1, Ordering::Relaxed) - 1;
+        log::debug!("Frame tracker: {} frames in flight (max: {})", count, self.max_frames_in_flight);
+    }
+
+    /// Get current frame count
+    fn count(&self) -> usize {
+        self.frames_in_flight.load(Ordering::Relaxed)
+    }
+
+    /// Check if we need to wait before submitting more work
+    fn should_wait(&self) -> bool {
+        self.count() >= self.max_frames_in_flight
+    }
 }
 
 /// Main device wrapper
@@ -34,6 +77,8 @@ pub struct BasaltDevice {
     // Lock-free swapchain state (wgpu-mc pattern)
     swapchain_state: arc_swap::ArcSwap<SwapchainState>,
     swapchain_format: wgt::TextureFormat,
+    // Frame-in-flight tracking for synchronization
+    frame_tracker: FrameTracker,
     // Cached blit pipeline for format conversion
     blit_bind_group_layout: parking_lot::Mutex<Option<id::BindGroupLayoutId>>,
     blit_pipeline: parking_lot::Mutex<Option<id::RenderPipelineId>>,
@@ -90,11 +135,15 @@ impl BasaltDevice {
 
         // Initial swapchain state
         let initial_state = SwapchainState {
-            current_texture: None,
             main_framebuffer: None,
             width,
             height,
         };
+
+        // Create frame tracker for triple buffering (2 frames max)
+        let frame_tracker = FrameTracker::new();
+        log::info!("Initialized frame tracker (max {} frames in flight for triple buffering)",
+            frame_tracker.max_frames_in_flight);
 
         Ok(Self {
             context,
@@ -106,6 +155,7 @@ impl BasaltDevice {
             info,
             swapchain_state: arc_swap::ArcSwap::from(Arc::new(initial_state)),
             swapchain_format,
+            frame_tracker,
             blit_bind_group_layout: parking_lot::Mutex::new(None),
             blit_pipeline: parking_lot::Mutex::new(None),
             shared_bind_group_layout,
@@ -308,18 +358,15 @@ impl BasaltDevice {
     }
 
     /// Acquire the swapchain texture for rendering
+    ///
+    /// Always acquires a fresh swapchain texture each frame to avoid race conditions
+    /// where a cached texture might have already been presented.
     pub fn acquire_swapchain_texture(&self) -> Result<id::TextureId> {
-        // Check if we already have one (lock-free read)
-        let state = self.swapchain_state.load();
-        if let Some(texture_id) = state.current_texture {
-            log::debug!("Using cached swapchain texture: {:?}", texture_id);
-            return Ok(texture_id);
-        }
-
         let surface = self.surface.as_ref()
             .ok_or_else(|| BasaltError::surface("No surface available"))?;
 
-        // Get the current swapchain texture
+        // Always get a fresh swapchain texture - no caching to avoid race conditions
+        // This ensures we never use a texture that's already been presented
         let output = self.context.inner().surface_get_current_texture(
             surface.id(),
             None,
@@ -328,22 +375,8 @@ impl BasaltDevice {
         let texture_id = output.texture
             .ok_or_else(|| BasaltError::surface("Swapchain texture not available"))?;
 
-        // Update swapchain state (lock-free swap)
-        let new_state = Arc::new(SwapchainState {
-            current_texture: Some(texture_id),
-            main_framebuffer: state.main_framebuffer,
-            width: state.width,
-            height: state.height,
-        });
-        self.swapchain_state.swap(new_state);
-
-        log::info!("Acquired swapchain texture: {:?}", texture_id);
+        log::info!("Acquired fresh swapchain texture: {:?}", texture_id);
         Ok(texture_id)
-    }
-
-    /// Get the current swapchain texture if available
-    pub fn get_swapchain_texture(&self) -> Option<id::TextureId> {
-        self.swapchain_state.load().current_texture
     }
 
     /// Blit from source texture to swapchain using a render pass
@@ -716,6 +749,11 @@ impl BasaltDevice {
     }
 
     /// Present the current frame
+    ///
+    /// Frame synchronization strategy:
+    /// - Track frames in flight (max 2 for triple buffering)
+    /// - Wait for oldest frame if too many are pending
+    /// - Increment on work submission, decrement when GPU completes
     pub fn present_frame(&self) -> Result<()> {
         let surface = match &self.surface {
             Some(s) => s,
@@ -724,6 +762,36 @@ impl BasaltDevice {
                 return Ok(());
             }
         };
+
+        // Frame synchronization: wait if too many frames are in flight
+        // This prevents the CPU from getting too far ahead of the GPU
+        if self.frame_tracker.should_wait() {
+            log::info!("Too many frames in flight ({}/{}), waiting for GPU to complete...",
+                self.frame_tracker.count(), self.frame_tracker.max_frames_in_flight);
+
+            // Wait indefinitely for the GPU to complete some work
+            // This blocks until at least one frame finishes
+            match self.poll_device(true) {
+                Ok(queue_empty) => {
+                    if queue_empty {
+                        // Queue is empty, all frames completed
+                        log::debug!("GPU queue empty, resetting frame tracker");
+                        // Reset to 0 since all frames are done
+                        while self.frame_tracker.count() > 0 {
+                            self.frame_tracker.decrement();
+                        }
+                    } else {
+                        // At least one frame completed
+                        self.frame_tracker.decrement();
+                        log::debug!("GPU completed one frame, {} frames remaining in flight",
+                            self.frame_tracker.count());
+                    }
+                }
+                Err(e) => {
+                    log::warn!("Failed to wait for GPU: {}, proceeding anyway", e);
+                }
+            }
+        }
 
         // Acquire the swapchain texture
         let swapchain_texture = match self.acquire_swapchain_texture() {
@@ -745,12 +813,17 @@ impl BasaltDevice {
                 // Continue anyway and try to present
             } else {
                 log::info!("Blit completed successfully");
+                // Increment frame tracker for work submitted during blit
+                self.frame_tracker.increment();
             }
         } else {
             // No main framebuffer detected - clear the swapchain to black to avoid garbage
             log::warn!("No main framebuffer detected - clearing swapchain to black");
             if let Err(e) = self.clear_swapchain(swapchain_texture) {
                 log::error!("Failed to clear swapchain: {}", e);
+            } else {
+                // Increment frame tracker for work submitted during clear
+                self.frame_tracker.increment();
             }
         }
 
@@ -762,30 +835,10 @@ impl BasaltDevice {
         match surface.present(self.queue_id) {
             Ok(status) => {
                 log::info!("Presented frame with status: {:?}", status);
-
-                // Clear the cached texture - it's been presented (lock-free swap)
-                let new_state = Arc::new(SwapchainState {
-                    current_texture: None,
-                    main_framebuffer: state.main_framebuffer,
-                    width: state.width,
-                    height: state.height,
-                });
-                self.swapchain_state.swap(new_state);
-
                 Ok(())
             }
             Err(e) => {
                 log::error!("Failed to present frame: {:?}", e);
-
-                // Clear the cached texture even on error (lock-free swap)
-                let new_state = Arc::new(SwapchainState {
-                    current_texture: None,
-                    main_framebuffer: state.main_framebuffer,
-                    width: state.width,
-                    height: state.height,
-                });
-                self.swapchain_state.swap(new_state);
-
                 Err(BasaltError::surface(format!("Failed to present: {:?}", e)))
             }
         }
@@ -904,7 +957,6 @@ impl BasaltDevice {
         // Lock-free swap
         let state = self.swapchain_state.load();
         let new_state = Arc::new(SwapchainState {
-            current_texture: state.current_texture,
             main_framebuffer: Some(texture_id),
             width: state.width,
             height: state.height,

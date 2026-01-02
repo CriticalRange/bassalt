@@ -229,7 +229,8 @@ impl RenderPassState {
     /// Record a set pipeline command and track depth write mode
     ///
     /// The depth mode is determined by the first pipeline set in the render pass.
-    /// Subsequent pipelines must be compatible with this mode.
+    /// Subsequent pipelines with different depth modes will log warnings but not skip draws.
+    /// This allows wgpu-core to handle validation and prevents missing geometry.
     pub fn record_set_pipeline(
         &mut self,
         pipeline_id: id::RenderPipelineId,
@@ -260,17 +261,10 @@ impl RenderPassState {
             };
 
             if self.depth_mode != expected_mode {
-                log::warn!("Pipeline depth mode mismatch: expected {:?}, got {:?}. Skipping this pipeline.",
+                // Log warning but don't skip draws - let wgpu-core handle validation
+                log::warn!("Pipeline depth mode mismatch: expected {:?}, got {:?}. Draws will continue (wgpu-core will validate).",
                     self.depth_mode, expected_mode);
-                // Mark pipeline as incompatible - draws will be skipped
-                self.pipeline_compatible = false;
-                self.commands.push(RenderCommand::SetPipeline { pipeline_id });
-                self.pipeline_set = true;
-                // Reset bind groups when pipeline changes
-                self.bind_groups_set = [false; 4];
-                return;
-            } else {
-                self.pipeline_compatible = true;
+                // Don't set pipeline_compatible = false - allow draws to proceed
             }
         }
 
@@ -338,12 +332,6 @@ impl RenderPassState {
         base_vertex: i32,
         first_instance: u32,
     ) {
-        // Skip draw if pipeline is incompatible with depth mode
-        if !self.pipeline_compatible {
-            log::warn!("DrawIndexed skipped - pipeline incompatible with depth mode");
-            return;
-        }
-
         // Validate state before draw
         if !self.pipeline_set {
             log::warn!("DrawIndexed called without pipeline set!");
@@ -368,12 +356,6 @@ impl RenderPassState {
         first_vertex: u32,
         first_instance: u32,
     ) {
-        // Skip draw if pipeline is incompatible with depth mode
-        if !self.pipeline_compatible {
-            log::warn!("Draw skipped - pipeline incompatible with depth mode");
-            return;
-        }
-
         self.commands.push(RenderCommand::Draw {
             vertex_count,
             instance_count,
@@ -699,6 +681,11 @@ impl RenderPassState {
                 "Failed to submit command buffer: {:?}", e
             )));
         }
+
+        // Poll the device to drive GPU progress and internal state machines
+        // This is important for proper frame synchronization and preventing stalls
+        // Use Poll (non-blocking) here - frame limiting is handled elsewhere
+        let _ = global.device_poll(self.device_id, wgt::PollType::Poll);
 
         self.is_active = false;
         log::debug!("Render pass executed with {} commands and submitted to queue", commands.len());

@@ -388,8 +388,17 @@ impl BindGroupBuilder {
             }
         }
         
-        log::debug!("Building bind group with {} entries (layout expects {})", 
+        log::debug!("Building bind group with {} entries (layout expects {})",
                    bind_entries.len(), binding_layouts.len());
+
+        // Log summary if any bindings were skipped
+        let skipped_count = binding_layouts.len().saturating_sub(bind_entries.len());
+        if skipped_count > 0 {
+            log::warn!("Skipped {} bindings due to size mismatches or missing resources. Total skipped count: {}",
+                skipped_count,
+                crate::timestamp_queries::SKIPPED_BUFFER_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+            );
+        }
 
         // Create bind group using the provided layout
         let bind_group_desc = binding_model::BindGroupDescriptor {
