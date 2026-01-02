@@ -4,7 +4,6 @@
 //! textures, samplers, and uniform buffers to shaders.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::num::NonZero;
 use std::sync::Arc;
 use wgpu_core::{binding_model, id};
@@ -191,10 +190,7 @@ impl BindGroupBuilder {
         );
 
         if let Some(e) = layout_error {
-            return Err(BasaltError::Device(format!(
-                "Failed to create bind group layout: {:?}",
-                e
-            )));
+            return Err(BasaltError::resource_creation("bind group layout", format!("{:?}", e)));
         }
 
         // Create bind group using the dynamically created layout
@@ -208,10 +204,7 @@ impl BindGroupBuilder {
             global.device_create_bind_group(self.device_id, &bind_group_desc, None);
 
         if let Some(e) = bind_group_error {
-            return Err(BasaltError::Device(format!(
-                "Failed to create bind group: {:?}",
-                e
-            )));
+            return Err(BasaltError::resource_creation("bind group", format!("{:?}", e)));
         }
 
         log::debug!(
@@ -249,11 +242,11 @@ impl BindGroupBuilder {
             })
             .collect();
         
-        // Collect our available uniform entries with size info
+        // Collect our available uniform entries WITH binding indices for proper lookup
         let uniform_entries: Vec<_> = self.entries.iter()
-            .filter_map(|(_, e)| match e {
-                BindingEntry::UniformBuffer { buffer_id, offset, size } => 
-                    Some((*buffer_id, *offset, size.get())),
+            .filter_map(|(binding, e)| match e {
+                BindingEntry::UniformBuffer { buffer_id, offset, size } =>
+                    Some((*binding, *buffer_id, *offset, size.get())),
                 _ => None,
             })
             .collect();
@@ -269,7 +262,6 @@ impl BindGroupBuilder {
         let mut bind_entries = Vec::new();
         let mut texture_idx = 0;
         let mut sampler_idx = 0;
-        let mut uniform_idx = 0;
 
         const MAX_UNIFORM_BUFFER_SIZE: u64 = 65536;
 
@@ -337,56 +329,54 @@ impl BindGroupBuilder {
                     }
                 }
                 BindingLayoutType::UniformBuffer | BindingLayoutType::StorageBuffer => {
-                    if uniform_idx < uniform_entries.len() {
-                        let (buffer_id, offset, buffer_size) = uniform_entries[uniform_idx];
-                        
+                    // Look up the entry by binding index (not sequential access)
+                    let uniform_entry = uniform_entries.iter()
+                        .find(|(binding, _, _, _)| *binding == layout_entry.binding);
+
+                    if let Some((_, buffer_id, offset, buffer_size)) = uniform_entry {
                         // Check if buffer size meets shader's minimum requirement
                         if let Some(min_size) = layout_entry.min_binding_size {
-                            if buffer_size < min_size {
+                            if *buffer_size < min_size {
                                 log::warn!(
                                     "Buffer size {} is smaller than shader expects {} for binding {}, skipping",
                                     buffer_size, min_size, layout_entry.binding
                                 );
-                                uniform_idx += 1;
                                 continue;
                             }
                         }
-                        
+
                         // Determine the actual size to bind
-                        // If we have min_binding_size from shader, use the smaller of buffer size and shader expectation
-                        // But also clamp to uniform buffer limit if it's a uniform buffer
                         let effective_size = if layout_entry.ty == BindingLayoutType::UniformBuffer {
                             // For uniform buffers, clamp to 64KB limit
-                            buffer_size.min(MAX_UNIFORM_BUFFER_SIZE)
+                            (*buffer_size).min(MAX_UNIFORM_BUFFER_SIZE)
                         } else {
                             // Storage buffers don't have this limit
-                            buffer_size
+                            *buffer_size
                         };
-                        
+
                         // Use explicit size instead of None to allow smaller buffers than shader declares
                         let binding_size = NonZero::new(effective_size);
-                        
+
                         if binding_size.is_some() {
                             bind_entries.push(binding_model::BindGroupEntry {
                                 binding: layout_entry.binding,
                                 resource: binding_model::BindingResource::Buffer(
                                     binding_model::BufferBinding {
-                                        buffer: buffer_id,
-                                        offset,
+                                        buffer: *buffer_id,
+                                        offset: *offset,
                                         size: binding_size,
                                     },
                                 ),
                             });
                             log::debug!(
-                                "Bound {} buffer to slot {} (size={})", 
+                                "Bound {} buffer to slot {} (size={})",
                                 if layout_entry.ty == BindingLayoutType::StorageBuffer { "storage" } else { "uniform" },
-                                layout_entry.binding, 
+                                layout_entry.binding,
                                 effective_size
                             );
                         } else {
                             log::warn!("Buffer size is 0 for binding {}, skipping", layout_entry.binding);
                         }
-                        uniform_idx += 1;
                     } else {
                         log::debug!("No buffer available for binding {} (expected by shader but not provided)", layout_entry.binding);
                     }
@@ -409,10 +399,7 @@ impl BindGroupBuilder {
 
         if let Some(e) = bind_group_error {
             log::error!("Failed to create bind group with pipeline layout: {:?}", e);
-            return Err(BasaltError::Device(format!(
-                "Failed to create bind group with pipeline layout: {:?}",
-                e
-            )));
+            return Err(BasaltError::resource_creation("pipeline bind group", format!("{:?}", e)));
         }
 
         log::debug!(

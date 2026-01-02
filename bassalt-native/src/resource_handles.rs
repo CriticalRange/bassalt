@@ -47,6 +47,9 @@ pub enum BindingLayoutType {
 /// Binding layout entry for a specific slot
 #[derive(Debug, Clone)]
 pub struct BindingLayoutEntry {
+    /// Which bind group this entry belongs to (0, 1, 2, etc.)
+    pub group: u32,
+    /// Binding slot within the group
     pub binding: u32,
     pub ty: BindingLayoutType,
     /// Minimum binding size expected by the shader (for buffer bindings)
@@ -62,7 +65,7 @@ pub struct BindingLayoutEntry {
 }
 
 /// Depth format expectation for a pipeline
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PipelineDepthFormat {
     /// Pipeline has no depth state (depth attachment must be None)
     None,

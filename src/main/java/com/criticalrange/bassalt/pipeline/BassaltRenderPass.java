@@ -170,10 +170,13 @@ public class BassaltRenderPass implements RenderPass {
     @Override
     public void setVertexBuffer(int slot, @Nullable GpuBuffer vertexBuffer) {
         checkClosed();
-        if (vertexBuffer == null || !(vertexBuffer instanceof BassaltBuffer))
+        if (vertexBuffer == null || !(vertexBuffer instanceof BassaltBuffer)) {
+            System.err.println("[Bassalt] setVertexBuffer SKIPPED: vertexBuffer is null or not BassaltBuffer");
             return;
+        }
 
         long bufferPtr = ((BassaltBuffer) vertexBuffer).getNativePtr();
+        System.out.println("[Bassalt] setVertexBuffer: slot=" + slot + ", bufferPtr=" + bufferPtr + ", size=" + vertexBuffer.size());
         device.setVertexBuffer(
                 device.getNativePtr(),
                 nativePassPtr,
@@ -185,11 +188,14 @@ public class BassaltRenderPass implements RenderPass {
     @Override
     public void setIndexBuffer(@Nullable GpuBuffer indexBuffer, VertexFormat.@Nullable IndexType indexType) {
         checkClosed();
-        if (indexBuffer == null || !(indexBuffer instanceof BassaltBuffer))
+        if (indexBuffer == null || !(indexBuffer instanceof BassaltBuffer)) {
+            System.err.println("[Bassalt] setIndexBuffer SKIPPED: indexBuffer is null or not BassaltBuffer (type=" + indexType + ")");
             return;
+        }
 
         long bufferPtr = ((BassaltBuffer) indexBuffer).getNativePtr();
         int type = indexType == VertexFormat.IndexType.INT ? 1 : 0;
+        System.out.println("[Bassalt] setIndexBuffer: bufferPtr=" + bufferPtr + ", type=" + type + " (" + indexType + "), size=" + indexBuffer.size());
 
         device.setIndexBuffer(
                 device.getNativePtr(),
@@ -202,20 +208,23 @@ public class BassaltRenderPass implements RenderPass {
     @Override
     public void drawIndexed(int baseVertex, int firstIndex, int indexCount, int instanceCount) {
         checkClosed();
-        
+
         // Skip draw if no valid pipeline
         if (currentPipelineHandle == 0) {
-            return;
-        }
-        
-        // Apply bindings before drawing
-        applyBindings();
-        
-        // Skip draw if bind group creation failed (pipeline expects bindings we can't provide)
-        if (!hasValidBindGroup) {
+            System.err.println("[Bassalt] drawIndexed SKIPPED: No valid pipeline set");
             return;
         }
 
+        // Apply bindings before drawing
+        applyBindings();
+
+        // Skip draw if bind group creation failed (pipeline expects bindings we can't provide)
+        if (!hasValidBindGroup) {
+            System.err.println("[Bassalt] drawIndexed SKIPPED: No valid bind group");
+            return;
+        }
+
+        System.out.println("[Bassalt] drawIndexed CALLING NATIVE: indices=" + indexCount + ", nativePassPtr=" + nativePassPtr);
         device.drawIndexed(
                 device.getNativePtr(),
                 nativePassPtr,

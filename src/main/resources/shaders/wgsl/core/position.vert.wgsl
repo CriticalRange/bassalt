@@ -1,7 +1,7 @@
-// Position vertex shader
-// Uniform layout:
-// Group 1: DynamicTransforms
-// Group 2: Projection
+// Position-only vertex shader
+// Used for weather, particles, etc. that need fog but no textures
+//
+// All bindings in group 0 to match Bassalt's single bind group approach
 
 struct DynamicTransforms {
     ModelViewMat: mat4x4<f32>,
@@ -15,8 +15,23 @@ struct Projection {
     ProjMat: mat4x4<f32>,
 }
 
-@group(1) @binding(0) var<uniform> transforms: DynamicTransforms;
-@group(2) @binding(0) var<uniform> projection: Projection;
+// Fog matches GLSL std140 layout exactly (48 bytes)
+struct Fog {
+    FogColor: vec4<f32>,
+    FogEnvironmentalStart: f32,
+    FogEnvironmentalEnd: f32,
+    FogRenderDistanceStart: f32,
+    FogRenderDistanceEnd: f32,
+    FogSkyEnd: f32,
+    FogCloudsEnd: f32,
+    _pad3: f32,
+    _pad4: f32,
+}
+
+// Group 0 bindings
+@group(0) @binding(4) var<uniform> transforms: DynamicTransforms;
+@group(0) @binding(5) var<uniform> projection: Projection;
+@group(0) @binding(8) var<uniform> fog: Fog;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -24,11 +39,28 @@ struct VertexInput {
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
+    @location(0) spherical_dist: f32,
+    @location(1) cylindrical_dist: f32,
+}
+
+fn fog_spherical_distance(pos: vec3<f32>) -> f32 {
+    return length(pos);
+}
+
+fn fog_cylindrical_distance(pos: vec3<f32>) -> f32 {
+    let distXZ = length(pos.xz);
+    let distY = abs(pos.y);
+    return max(distXZ, distY);
 }
 
 @vertex
 fn main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
+
     out.position = projection.ProjMat * transforms.ModelViewMat * vec4<f32>(in.position, 1.0);
+
+    out.spherical_dist = fog_spherical_distance(in.position);
+    out.cylindrical_dist = fog_cylindrical_distance(in.position);
+
     return out;
 }

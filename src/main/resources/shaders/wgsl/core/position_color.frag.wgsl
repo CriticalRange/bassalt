@@ -1,19 +1,23 @@
 // Position-Color fragment shader
+//
+// All bindings in group 0 to match Bassalt's single bind group approach
 
-struct DynamicUniforms {
-    model_view: mat4x4<f32>,
-    color_mod: vec4<f32>,
-    model_offset: vec3<f32>,
+struct DynamicTransforms {
+    ModelViewMat: mat4x4<f32>,
+    ColorModulator: vec4<f32>,
+    ModelOffset: vec3<f32>,
     _pad0: f32,
-    texture_mat: mat4x4<f32>,
+    TextureMat: mat4x4<f32>,
 }
 
-@group(1) @binding(0) var<uniform> uniforms: DynamicUniforms;
+// Group 0 bindings
+@group(0) @binding(4) var<uniform> transforms: DynamicTransforms;
 
 @fragment
 fn main(@location(0) vertex_color: vec4<f32>) -> @location(0) vec4<f32> {
-    if (vertex_color.a < 0.01) {
+    // GLSL uses: if (color.a == 0.0) discard;
+    if (vertex_color.a == 0.0) {
         discard;
     }
-    return vertex_color * uniforms.color_mod;
+    return vertex_color * transforms.ColorModulator;
 }

@@ -8,7 +8,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use parking_lot::RwLock;
-use guillotiere::{AtlasAllocator, Size, Allocation, AllocId};
+use guillotiere::{AtlasAllocator, Size, AllocId};
 use wgpu_core::id;
 use wgpu_types as wgt;
 
@@ -184,7 +184,7 @@ impl TextureAtlas {
 
         let allocation = allocator
             .allocate(Size::new(width as i32, height as i32))
-            .ok_or_else(|| BasaltError::OutOfMemory(format!(
+            .ok_or_else(|| BasaltError::out_of_memory(format!(
                 "Atlas '{}' cannot fit {}x{} region",
                 self.label, width, height
             )))?;
@@ -229,7 +229,8 @@ impl TextureAtlas {
     /// Upload pixel data to a region
     pub fn upload(&self, handle: AtlasHandle, data: &[u8]) -> Result<()> {
         let region = self.regions.read().get(&handle.0).cloned()
-            .ok_or_else(|| BasaltError::InvalidParameter(
+            .ok_or_else(|| BasaltError::invalid_parameter(
+                "handle",
                 format!("Invalid atlas handle: {:?}", handle.0)
             ))?;
 
@@ -246,10 +247,11 @@ impl TextureAtlas {
 
         let expected_size = (region.width * region.height * bytes_per_pixel) as usize;
         if data.len() < expected_size {
-            return Err(BasaltError::InvalidParameter(format!(
-                "Data size {} is less than expected {} for {}x{} region",
-                data.len(), expected_size, region.width, region.height
-            )));
+            return Err(BasaltError::invalid_parameter(
+                "data_size",
+                format!("Data size {} is less than expected {} for {}x{} region",
+                    data.len(), expected_size, region.width, region.height)
+            ));
         }
 
         let texture_copy = wgt::TexelCopyTextureInfo {
@@ -323,8 +325,8 @@ impl TextureAtlas {
 
 impl Drop for TextureAtlas {
     fn drop(&mut self) {
-        self.context.inner().texture_view_drop(self.texture_view_id);
-        self.context.inner().texture_drop(self.texture_id);
+        let _ = self.context.inner().texture_view_drop(self.texture_view_id);
+        let _ = self.context.inner().texture_drop(self.texture_id);
         log::debug!("Dropped atlas '{}'", self.label);
     }
 }
@@ -431,7 +433,7 @@ impl AtlasManager {
     }
 
     /// Get a custom atlas by name
-    pub fn get_custom_atlas(&self, name: &str) -> Option<&TextureAtlas> {
+    pub fn get_custom_atlas(&self, _name: &str) -> Option<&TextureAtlas> {
         // Note: This is a bit awkward due to RwLock, but works for read access
         // In practice, you'd typically hold the lock briefly
         None // Would need different architecture for proper borrowing

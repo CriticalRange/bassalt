@@ -1,11 +1,7 @@
 // Block vertex shader
 // Used for rendering blocks
 //
-// Uniform layout (consistent with fragment shader):
-// Group 0: Sampler0 (block texture) + Sampler2 (lightmap)
-// Group 1: DynamicTransforms
-// Group 2: Projection
-// Group 3: Fog (declared for layout consistency)
+// All bindings in group 0 to match Bassalt's single bind group approach
 
 struct DynamicTransforms {
     ModelViewMat: mat4x4<f32>,
@@ -19,17 +15,33 @@ struct Projection {
     ProjMat: mat4x4<f32>,
 }
 
-// Group 0: Textures (block texture at 0,1 - lightmap at 2,3)
+// Fog matches GLSL std140 layout exactly (48 bytes)
+struct Fog {
+    FogColor: vec4<f32>,
+    FogEnvironmentalStart: f32,
+    FogEnvironmentalEnd: f32,
+    FogRenderDistanceStart: f32,
+    FogRenderDistanceEnd: f32,
+    FogSkyEnd: f32,
+    FogCloudsEnd: f32,
+    _pad3: f32,
+    _pad4: f32,
+}
+
+// All bindings in group 0 with different binding indices
+// Bindings 0-3: Textures (Sampler0, Sampler0Sampler, Sampler2, Sampler2Sampler)
+// Binding 4: DynamicTransforms
+// Binding 5: Projection
+// Binding 8: Fog
+
 @group(0) @binding(0) var Sampler0: texture_2d<f32>;
 @group(0) @binding(1) var Sampler0Sampler: sampler;
 @group(0) @binding(2) var Sampler2: texture_2d<f32>;
 @group(0) @binding(3) var Sampler2Sampler: sampler;
 
-// Group 1: DynamicTransforms
-@group(1) @binding(0) var<uniform> transforms: DynamicTransforms;
-
-// Group 2: Projection
-@group(2) @binding(0) var<uniform> projection: Projection;
+@group(0) @binding(4) var<uniform> transforms: DynamicTransforms;
+@group(0) @binding(5) var<uniform> projection: Projection;
+@group(0) @binding(8) var<uniform> fog: Fog;
 
 // Vertex format: POSITION_COLOR_TEX_TEX_NORMAL (format 7)
 struct VertexInput {
@@ -66,18 +78,18 @@ fn sample_lightmap(uv: vec2<f32>) -> vec4<f32> {
 @vertex
 fn main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    
+
     let pos = in.position + transforms.ModelOffset;
     out.position = projection.ProjMat * transforms.ModelViewMat * vec4<f32>(pos, 1.0);
-    
+
     out.spherical_dist = fog_spherical_distance(pos);
     out.cylindrical_dist = fog_cylindrical_distance(pos);
-    
+
     // Sample lightmap
     let lightmapColor = sample_lightmap(in.uv2);
     out.vertex_color = in.color * lightmapColor;
-    
+
     out.tex_coord = in.uv0;
-    
+
     return out;
 }

@@ -43,7 +43,7 @@ impl BasaltAdapter {
             .context
             .inner()
             .adapter_request_device(self.adapter_id, desc, None, None)
-            .map_err(|e| crate::error::BasaltError::Device(format!("{:?}", e)))?;
+            .map_err(|e| crate::error::BasaltError::device_creation(format!("{:?}", e)))?;
 
         Ok((device_id, queue_id))
     }
