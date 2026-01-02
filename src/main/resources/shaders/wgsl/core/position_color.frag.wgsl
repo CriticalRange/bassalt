@@ -2,7 +2,7 @@
 //
 // All bindings in group 0 to match Bassalt's single bind group approach
 
-struct DynamicTransforms {
+struct DynamicTransforms_t {
     ModelViewMat: mat4x4<f32>,
     ColorModulator: vec4<f32>,
     ModelOffset: vec3<f32>,
@@ -11,7 +11,7 @@ struct DynamicTransforms {
 }
 
 // Group 0 bindings
-@group(0) @binding(4) var<uniform> transforms: DynamicTransforms;
+@group(0) @binding(4) var<uniform> DynamicTransforms: DynamicTransforms_t;
 
 @fragment
 fn main(@location(0) vertex_color: vec4<f32>) -> @location(0) vec4<f32> {
@@ -19,5 +19,5 @@ fn main(@location(0) vertex_color: vec4<f32>) -> @location(0) vec4<f32> {
     if (vertex_color.a == 0.0) {
         discard;
     }
-    return vertex_color * transforms.ColorModulator;
+    return vertex_color * DynamicTransforms.ColorModulator;
 }

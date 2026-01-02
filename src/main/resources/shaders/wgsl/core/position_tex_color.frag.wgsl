@@ -3,7 +3,7 @@
 //
 // All bindings in group 0 to match Bassalt's single bind group approach
 
-struct DynamicTransforms {
+struct DynamicTransforms_t {
     ModelViewMat: mat4x4<f32>,
     ColorModulator: vec4<f32>,
     ModelOffset: vec3<f32>,
@@ -14,7 +14,7 @@ struct DynamicTransforms {
 // Group 0 bindings
 @group(0) @binding(0) var Sampler0: texture_2d<f32>;
 @group(0) @binding(1) var Sampler0Sampler: sampler;
-@group(0) @binding(4) var<uniform> transforms: DynamicTransforms;
+@group(0) @binding(4) var<uniform> DynamicTransforms: DynamicTransforms_t;
 
 struct FragmentInput {
     @location(0) tex_coord: vec2<f32>,
@@ -35,5 +35,5 @@ fn main(in: FragmentInput) -> @location(0) vec4<f32> {
     }
     
     // Apply color modulator (tint from Minecraft)
-    return color * transforms.ColorModulator;
+    return color * DynamicTransforms.ColorModulator;
 }
