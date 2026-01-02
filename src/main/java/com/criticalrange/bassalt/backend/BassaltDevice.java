@@ -217,8 +217,18 @@ public class BassaltDevice implements GpuDevice {
 
     @Override
     public List<String> getLastDebugMessages() {
-        return List.of(); // TODO: implement debug message tracking
+        String[] messages = getLastDebugMessagesNative();
+        if (messages == null) {
+            return List.of();
+        }
+        return List.of(messages);
     }
+
+    /**
+     * Native method to retrieve debug messages from the native layer.
+     * Returns an array of strings in format "[LEVEL] message".
+     */
+    private static native String[] getLastDebugMessagesNative();
 
     @Override
     public boolean isDebuggingEnabled() {
@@ -400,6 +410,8 @@ public class BassaltDevice implements GpuDevice {
                 }
             } else if (hasPosition && hasColor && uvCount == 1 && hasNormal) {
                 return 4; // POSITION_TEX_COLOR_NORMAL (reusing for POSITION_COLOR_TEX_NORMAL)
+            } else if (hasPosition && hasColor && uvCount == 2 && !hasNormal) {
+                return 8; // POSITION_COLOR_TEX_TEX (position, color, uv0, uv2) - no normal
             } else if (hasPosition && hasColor && uvCount == 2 && hasNormal) {
                 return 7; // POSITION_COLOR_TEX_TEX_NORMAL (position, color, uv0, uv2, normal)
             } else if (hasPosition && hasColor && uvCount == 3 && hasNormal) {

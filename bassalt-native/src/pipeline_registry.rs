@@ -41,6 +41,10 @@ pub struct RenderPipelineKey {
     pub target_format: wgt::TextureFormat,
     /// Depth format (CRITICAL: pipelines with different depth formats are incompatible!)
     pub depth_format: PipelineDepthFormat,
+    /// Depth bias constant factor (polygon offset units)
+    pub depth_bias_constant: i32,
+    /// Depth bias slope scale factor (polygon offset factor)
+    pub depth_bias_slope_scale: u32, // Stored as bits for hashing
 }
 
 /// Cached shader module with metadata
@@ -57,12 +61,13 @@ pub struct CachedShaderModule {
 }
 
 /// Cached render pipeline with metadata
+/// Simplified to single bind group (group 0) only
 #[derive(Clone)]
 pub struct CachedRenderPipeline {
     /// The render pipeline ID
     pub pipeline_id: id::RenderPipelineId,
-    /// Bind group layout IDs (for all groups)
-    pub bind_group_layout_ids: Vec<id::BindGroupLayoutId>,
+    /// Bind group layout ID (group 0)
+    pub bind_group_layout_id: id::BindGroupLayoutId,
     /// Pipeline layout ID
     pub pipeline_layout_id: id::PipelineLayoutId,
     /// Binding layouts from shader reflection
@@ -201,7 +206,7 @@ impl PipelineCache {
         vertex_wgsl: &str,
         fragment_wgsl: &str,
         pipeline_layout_id: id::PipelineLayoutId,
-        bind_group_layout_ids: Vec<id::BindGroupLayoutId>,
+        bind_group_layout_id: id::BindGroupLayoutId,
         binding_layouts: Vec<BindingLayoutEntry>,
         depth_format: PipelineDepthFormat,
         vertex_format_index: usize,
@@ -243,12 +248,15 @@ impl PipelineCache {
         let vertex_buffers = Self::create_vertex_buffer_layout(vertex_format_index);
 
         // Create depth stencil state
-        log::info!("About to call create_depth_stencil_state with depth_format={:?}", depth_format);
+        log::info!("About to call create_depth_stencil_state with depth_format={:?}, bias=({}, {})", 
+            depth_format, key.depth_bias_constant, f32::from_bits(key.depth_bias_slope_scale));
         let depth_stencil = Self::create_depth_stencil_state(
             key.depth_test_enabled,
             key.depth_write_enabled,
             key.depth_compare,
             depth_format,
+            key.depth_bias_constant,
+            f32::from_bits(key.depth_bias_slope_scale),
         );
         log::info!("create_depth_stencil_state returned: {:?}", depth_stencil.is_some());
 
@@ -332,7 +340,7 @@ impl PipelineCache {
         // Cache the pipeline
         let cached = CachedRenderPipeline {
             pipeline_id,
-            bind_group_layout_ids,
+            bind_group_layout_id,
             pipeline_layout_id,
             binding_layouts,
             depth_format,
@@ -394,22 +402,60 @@ impl PipelineCache {
     }
 
     /// Create vertex buffer layout based on format index
+    /// Matches the full implementation in lib.rs
     fn create_vertex_buffer_layout(format_index: usize) -> Cow<'static, [wgpu_core::pipeline::VertexBufferLayout<'static>]> {
-        // Same implementation as in lib.rs - could be refactored to share
         match format_index {
-            255 => Cow::Borrowed(&[]), // EMPTY
+            // 255 = EMPTY (no vertex input - shader uses @builtin(vertex_index))
+            255 => Cow::Borrowed(&[]),
+            // 0 = POSITION (3 floats)
             0 => Cow::Owned(vec![wgpu_core::pipeline::VertexBufferLayout {
-                array_stride: 12,
+                array_stride: 12, // 3 floats * 4 bytes
                 step_mode: wgt::VertexStepMode::Vertex,
-                attributes: Cow::Owned(vec![wgt::VertexAttribute {
-                    format: wgt::VertexFormat::Float32x3,
-                    offset: 0,
-                    shader_location: 0,
-                }]),
+                attributes: Cow::Owned(vec![
+                    wgt::VertexAttribute {
+                        format: wgt::VertexFormat::Float32x3,
+                        offset: 0,
+                        shader_location: 0,
+                    },
+                ]),
             }]),
-            // ... other formats would be here
-            _ => Cow::Owned(vec![wgpu_core::pipeline::VertexBufferLayout {
-                array_stride: 36,
+            // 1 = POSITION_COLOR (3 floats + 4 floats)
+            1 => Cow::Owned(vec![wgpu_core::pipeline::VertexBufferLayout {
+                array_stride: 28, // 12 + 16 = 28 bytes
+                step_mode: wgt::VertexStepMode::Vertex,
+                attributes: Cow::Owned(vec![
+                    wgt::VertexAttribute {
+                        format: wgt::VertexFormat::Float32x3,
+                        offset: 0,
+                        shader_location: 0,
+                    },
+                    wgt::VertexAttribute {
+                        format: wgt::VertexFormat::Float32x4,
+                        offset: 12,
+                        shader_location: 1,
+                    },
+                ]),
+            }]),
+            // 2 = POSITION_TEX (3 floats + 2 floats)
+            2 => Cow::Owned(vec![wgpu_core::pipeline::VertexBufferLayout {
+                array_stride: 20, // 12 + 8 = 20 bytes
+                step_mode: wgt::VertexStepMode::Vertex,
+                attributes: Cow::Owned(vec![
+                    wgt::VertexAttribute {
+                        format: wgt::VertexFormat::Float32x3,
+                        offset: 0,
+                        shader_location: 0,
+                    },
+                    wgt::VertexAttribute {
+                        format: wgt::VertexFormat::Float32x2,
+                        offset: 12,
+                        shader_location: 1,
+                    },
+                ]),
+            }]),
+            // 3 = POSITION_TEX_COLOR (3 floats + 2 floats + 4 floats)
+            3 => Cow::Owned(vec![wgpu_core::pipeline::VertexBufferLayout {
+                array_stride: 36, // 12 + 8 + 16 = 36 bytes
                 step_mode: wgt::VertexStepMode::Vertex,
                 attributes: Cow::Owned(vec![
                     wgt::VertexAttribute {
@@ -429,48 +475,223 @@ impl PipelineCache {
                     },
                 ]),
             }]),
+            // 4 = POSITION_TEX_COLOR_NORMAL (3 floats + 2 floats + 4 floats + 3 floats)
+            4 => Cow::Owned(vec![wgpu_core::pipeline::VertexBufferLayout {
+                array_stride: 48, // 12 + 8 + 16 + 12 = 48 bytes
+                step_mode: wgt::VertexStepMode::Vertex,
+                attributes: Cow::Owned(vec![
+                    wgt::VertexAttribute {
+                        format: wgt::VertexFormat::Float32x3,
+                        offset: 0,
+                        shader_location: 0,
+                    },
+                    wgt::VertexAttribute {
+                        format: wgt::VertexFormat::Float32x2,
+                        offset: 12,
+                        shader_location: 1,
+                    },
+                    wgt::VertexAttribute {
+                        format: wgt::VertexFormat::Float32x4,
+                        offset: 20,
+                        shader_location: 2,
+                    },
+                    wgt::VertexAttribute {
+                        format: wgt::VertexFormat::Float32x3,
+                        offset: 36,
+                        shader_location: 3,
+                    },
+                ]),
+            }]),
+            // 5 = POSITION_COLOR_TEX (3 floats + 4 floats + 2 floats)
+            5 => Cow::Owned(vec![wgpu_core::pipeline::VertexBufferLayout {
+                array_stride: 36, // 12 + 16 + 8 = 36 bytes
+                step_mode: wgt::VertexStepMode::Vertex,
+                attributes: Cow::Owned(vec![
+                    wgt::VertexAttribute {
+                        format: wgt::VertexFormat::Float32x3,
+                        offset: 0,
+                        shader_location: 0, // position
+                    },
+                    wgt::VertexAttribute {
+                        format: wgt::VertexFormat::Float32x4,
+                        offset: 12,
+                        shader_location: 1, // color
+                    },
+                    wgt::VertexAttribute {
+                        format: wgt::VertexFormat::Float32x2,
+                        offset: 28,
+                        shader_location: 2, // uv
+                    },
+                ]),
+            }]),
+            // 6 = POSITION_COLOR_TEX_TEX_TEX_NORMAL (position, color, uv0, uv1, uv2, normal)
+            6 => Cow::Owned(vec![wgpu_core::pipeline::VertexBufferLayout {
+                array_stride: 64, // 12 + 16 + 8 + 8 + 8 + 12 = 64 bytes
+                step_mode: wgt::VertexStepMode::Vertex,
+                attributes: Cow::Owned(vec![
+                    wgt::VertexAttribute {
+                        format: wgt::VertexFormat::Float32x3,
+                        offset: 0,
+                        shader_location: 0, // position
+                    },
+                    wgt::VertexAttribute {
+                        format: wgt::VertexFormat::Float32x4,
+                        offset: 12,
+                        shader_location: 1, // color
+                    },
+                    wgt::VertexAttribute {
+                        format: wgt::VertexFormat::Float32x2,
+                        offset: 28,
+                        shader_location: 2, // uv0
+                    },
+                    wgt::VertexAttribute {
+                        format: wgt::VertexFormat::Float32x2,
+                        offset: 36,
+                        shader_location: 3, // uv1
+                    },
+                    wgt::VertexAttribute {
+                        format: wgt::VertexFormat::Float32x2,
+                        offset: 44,
+                        shader_location: 4, // uv2
+                    },
+                    wgt::VertexAttribute {
+                        format: wgt::VertexFormat::Float32x3,
+                        offset: 52,
+                        shader_location: 5, // normal
+                    },
+                ]),
+            }]),
+            // 7 = POSITION_COLOR_TEX_TEX_NORMAL (position, color, uv0, uv2, normal - skips uv1)
+            7 => Cow::Owned(vec![wgpu_core::pipeline::VertexBufferLayout {
+                array_stride: 56, // 12 + 16 + 8 + 8 + 12 = 56 bytes
+                step_mode: wgt::VertexStepMode::Vertex,
+                attributes: Cow::Owned(vec![
+                    wgt::VertexAttribute {
+                        format: wgt::VertexFormat::Float32x3,
+                        offset: 0,
+                        shader_location: 0, // position
+                    },
+                    wgt::VertexAttribute {
+                        format: wgt::VertexFormat::Float32x4,
+                        offset: 12,
+                        shader_location: 1, // color
+                    },
+                    wgt::VertexAttribute {
+                        format: wgt::VertexFormat::Float32x2,
+                        offset: 28,
+                        shader_location: 2, // uv0
+                    },
+                    wgt::VertexAttribute {
+                        format: wgt::VertexFormat::Float32x2,
+                        offset: 36,
+                        shader_location: 3, // uv2
+                    },
+                    wgt::VertexAttribute {
+                        format: wgt::VertexFormat::Float32x3,
+                        offset: 44,
+                        shader_location: 4, // normal
+                    },
+                ]),
+            }]),
+            // 8 = POSITION_COLOR_TEX_TEX (position, color, uv0, uv2 - no normal)
+            8 => Cow::Owned(vec![wgpu_core::pipeline::VertexBufferLayout {
+                array_stride: 44, // 12 + 16 + 8 + 8 = 44 bytes
+                step_mode: wgt::VertexStepMode::Vertex,
+                attributes: Cow::Owned(vec![
+                    wgt::VertexAttribute {
+                        format: wgt::VertexFormat::Float32x3,
+                        offset: 0,
+                        shader_location: 0, // position
+                    },
+                    wgt::VertexAttribute {
+                        format: wgt::VertexFormat::Float32x4,
+                        offset: 12,
+                        shader_location: 1, // color
+                    },
+                    wgt::VertexAttribute {
+                        format: wgt::VertexFormat::Float32x2,
+                        offset: 28,
+                        shader_location: 2, // uv0
+                    },
+                    wgt::VertexAttribute {
+                        format: wgt::VertexFormat::Float32x2,
+                        offset: 36,
+                        shader_location: 3, // uv2
+                    },
+                ]),
+            }]),
+            // Default to POSITION_TEX_COLOR for unknown formats
+            _ => {
+                log::warn!("Unknown vertex format index: {}, defaulting to POSITION_TEX_COLOR", format_index);
+                Cow::Owned(vec![wgpu_core::pipeline::VertexBufferLayout {
+                    array_stride: 36,
+                    step_mode: wgt::VertexStepMode::Vertex,
+                    attributes: Cow::Owned(vec![
+                        wgt::VertexAttribute {
+                            format: wgt::VertexFormat::Float32x3,
+                            offset: 0,
+                            shader_location: 0,
+                        },
+                        wgt::VertexAttribute {
+                            format: wgt::VertexFormat::Float32x2,
+                            offset: 12,
+                            shader_location: 1,
+                        },
+                        wgt::VertexAttribute {
+                            format: wgt::VertexFormat::Float32x4,
+                            offset: 20,
+                            shader_location: 2,
+                        },
+                    ]),
+                }])
+            }
         }
     }
 
     /// Create depth stencil state
-    /// NOTE: wgpu-core appears to require depth_stencil state for all pipelines.
-    /// Even when a shader doesn't write depth, we need to provide a dummy state.
+    ///
+    /// **CRITICAL FIX**: When PipelineDepthFormat::None, return None instead of a dummy state.
+    /// This prevents pipeline-renderpass format mismatches that cause draw failures.
+    ///
+    /// Previously, we created a "no-op" depth state for pipelines without depth output,
+    /// but this caused validation errors when render passes didn't have depth attachments.
+    /// wgpu-core requires strict format matching between pipeline and render pass.
     fn create_depth_stencil_state(
         depth_test_enabled: bool,
         depth_write_enabled: bool,
         depth_compare: wgt::CompareFunction,
         depth_format: PipelineDepthFormat,
+        depth_bias_constant: i32,
+        depth_bias_slope_scale: f32,
     ) -> Option<wgt::DepthStencilState> {
+        // CRITICAL: If pipeline doesn't write depth, return None
+        // This ensures pipeline and render pass depth state match
+        if matches!(depth_format, PipelineDepthFormat::None) {
+            log::info!("Creating pipeline WITHOUT depth stencil state (shader doesn't write depth)");
+            return None;
+        }
+
         // Determine the format to use
         let format = match depth_format {
-            PipelineDepthFormat::None => wgt::TextureFormat::Depth32Float,  // Use Depth32Float to match existing depth textures
+            PipelineDepthFormat::None => unreachable!(), // Already handled above
             PipelineDepthFormat::Depth32Float => wgt::TextureFormat::Depth32Float,
             PipelineDepthFormat::Depth24Plus => wgt::TextureFormat::Depth24Plus,
             PipelineDepthFormat::Depth24PlusStencil8 => wgt::TextureFormat::Depth24PlusStencil8,
         };
 
-        // If the shader doesn't write depth, use a no-op depth state
-        let is_no_op = matches!(depth_format, PipelineDepthFormat::None);
-
-        if is_no_op {
-            log::info!("Creating pipeline with NO-OP depth state (CompareFunction::Always, no write)");
-            Some(wgt::DepthStencilState {
-                format,
-                depth_write_enabled: false,  // Never write
-                depth_compare: wgt::CompareFunction::Always,  // Always pass
-                stencil: wgt::StencilState::default(),
-                bias: wgt::DepthBiasState::default(),
-            })
-        } else {
-            log::info!("Creating pipeline WITH depth stencil state: {:?}", format);
-            Some(wgt::DepthStencilState {
-                format,
-                depth_write_enabled: if depth_test_enabled { depth_write_enabled } else { false },
-                depth_compare: if depth_test_enabled { depth_compare } else { wgt::CompareFunction::Always },
-                stencil: wgt::StencilState::default(),
-                bias: wgt::DepthBiasState::default(),
-            })
-        }
+        log::info!("Creating pipeline WITH depth stencil state: format={:?}, bias=({}, {})", 
+            format, depth_bias_constant, depth_bias_slope_scale);
+        Some(wgt::DepthStencilState {
+            format,
+            depth_write_enabled: if depth_test_enabled { depth_write_enabled } else { false },
+            depth_compare: if depth_test_enabled { depth_compare } else { wgt::CompareFunction::Always },
+            stencil: wgt::StencilState::default(),
+            bias: wgt::DepthBiasState {
+                constant: depth_bias_constant,
+                slope_scale: depth_bias_slope_scale,
+                clamp: 0.0, // No clamping (matches OpenGL default)
+            },
+        })
     }
 }
 
@@ -492,6 +713,8 @@ impl std::hash::Hash for RenderPipelineKey {
         self.blend_enabled.hash(state);
         self.target_format.hash(state);
         self.depth_format.hash(state);  // CRITICAL: Include depth_format in hash!
+        self.depth_bias_constant.hash(state);  // Include depth bias in hash
+        self.depth_bias_slope_scale.hash(state);  // Stored as bits for hashing
     }
 }
 
@@ -521,6 +744,8 @@ mod tests {
             blend_enabled: false,
             target_format: wgt::TextureFormat::Rgba8UnormSrgb,
             depth_format: PipelineDepthFormat::Depth32Float,
+            depth_bias_constant: 0,
+            depth_bias_slope_scale: 0,
         };
 
         let key2 = RenderPipelineKey {
@@ -533,6 +758,8 @@ mod tests {
             blend_enabled: false,
             target_format: wgt::TextureFormat::Rgba8UnormSrgb,
             depth_format: PipelineDepthFormat::Depth32Float,
+            depth_bias_constant: 0,
+            depth_bias_slope_scale: 0,
         };
 
         assert_eq!(key1, key2);

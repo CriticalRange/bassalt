@@ -63,7 +63,7 @@ fn sampleNearest(source: texture_2d<f32>, samp: sampler, uv: vec2<f32>, pixelSiz
     let adjustedOffset = (texelOffset - 0.5) * pixelSize / texelScreenSize + 0.5;
     let clampedOffset = clamp(adjustedOffset, vec2<f32>(0.0), vec2<f32>(1.0));
     let adjustedUV = (texelCenter + clampedOffset) * pixelSize;
-    return textureGrad(source, samp, adjustedUV, du, dv);
+    return textureSampleGrad(source, samp, adjustedUV, du, dv);
 }
 
 fn sampleTerrain(source: texture_2d<f32>, samp: sampler, uv: vec2<f32>) -> vec4<f32> {

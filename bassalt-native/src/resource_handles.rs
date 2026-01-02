@@ -45,11 +45,10 @@ pub enum BindingLayoutType {
 }
 
 /// Binding layout entry for a specific slot
+/// All bindings are in group 0 (single bind group approach)
 #[derive(Debug, Clone)]
 pub struct BindingLayoutEntry {
-    /// Which bind group this entry belongs to (0, 1, 2, etc.)
-    pub group: u32,
-    /// Binding slot within the group
+    /// Binding slot within group 0
     pub binding: u32,
     pub ty: BindingLayoutType,
     /// Minimum binding size expected by the shader (for buffer bindings)
@@ -60,7 +59,7 @@ pub struct BindingLayoutEntry {
     pub expected_dimension: Option<wgpu_types::TextureViewDimension>,
     /// Variable name in the shader (for uniform buffers)
     /// Used to map Minecraft's named uniforms to binding slots
-    /// Example: "dynamic_transforms" for DynamicTransforms uniform
+    /// Example: "DynamicTransforms" for DynamicTransforms uniform
     pub variable_name: Option<String>,
 }
 
@@ -84,14 +83,18 @@ impl Default for PipelineDepthFormat {
 }
 
 /// Render pipeline info stored alongside ID
+/// Simplified to single bind group (group 0) only
 #[derive(Debug, Clone)]
 pub struct RenderPipelineInfo {
     pub id: id::RenderPipelineId,
-    pub bind_group_layout_id: id::BindGroupLayoutId,  // Group 0 layout (legacy)
-    pub bind_group_layout_ids: Vec<id::BindGroupLayoutId>,  // All group layouts [0, 1, 2, ...]
-    pub binding_layouts: Vec<BindingLayoutEntry>, // What type each binding expects (group 0)
+    pub bind_group_layout_id: id::BindGroupLayoutId,  // Group 0 layout
+    pub binding_layouts: Vec<BindingLayoutEntry>, // What type each binding expects
     /// What depth format this pipeline expects (None = no depth, Some = specific format)
     pub depth_format: PipelineDepthFormat,
+    /// Whether this pipeline writes to the depth buffer
+    pub depth_write_enabled: bool,
+    /// Whether this pipeline has depth testing enabled
+    pub depth_test_enabled: bool,
 }
 
 
@@ -249,17 +252,19 @@ impl ResourceHandleStore {
         &self,
         pipeline_id: id::RenderPipelineId,
         bind_group_layout_id: id::BindGroupLayoutId,
-        bind_group_layout_ids: Vec<id::BindGroupLayoutId>,
         binding_layouts: Vec<BindingLayoutEntry>,
         depth_format: PipelineDepthFormat,
+        depth_write_enabled: bool,
+        depth_test_enabled: bool,
     ) -> u64 {
         let handle = self.next();
         let info = RenderPipelineInfo {
             id: pipeline_id,
             bind_group_layout_id,
-            bind_group_layout_ids,
             binding_layouts,
             depth_format,
+            depth_write_enabled,
+            depth_test_enabled,
         };
         self.render_pipelines.write().insert(handle, info);
         handle

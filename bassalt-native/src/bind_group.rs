@@ -277,7 +277,7 @@ impl BindGroupBuilder {
                                 // Create a new view with the correct dimension
                                 log::debug!("Texture dimension mismatch at binding {}: expected {:?}, got {:?}. Creating new view.",
                                            layout_entry.binding, expected_dim, current_dimension);
-                                
+
                                 let view_desc = wgpu_core::resource::TextureViewDescriptor {
                                     label: Some(Cow::Borrowed("Rebind Texture View")),
                                     format: None,
@@ -285,16 +285,18 @@ impl BindGroupBuilder {
                                     usage: None,
                                     range: wgt::ImageSubresourceRange::default(),
                                 };
-                                
+
                                 let (new_view_id, error) = global.texture_create_view(
                                     texture_id,
                                     &view_desc,
                                     None,
                                 );
-                                
+
                                 if let Some(e) = error {
                                     log::error!("Failed to create texture view with dimension {:?}: {:?}", expected_dim, e);
-                                    view_id // Fall back to original view
+                                    log::warn!("Skipping texture binding at slot {} due to view creation failure", layout_entry.binding);
+                                    texture_idx += 1;
+                                    continue; // Skip this binding
                                 } else {
                                     new_view_id
                                 }
@@ -341,6 +343,8 @@ impl BindGroupBuilder {
                                     "Buffer size {} is smaller than shader expects {} for binding {}, skipping",
                                     buffer_size, min_size, layout_entry.binding
                                 );
+                                // Track skip statistics for monitoring
+                                crate::timestamp_queries::SKIPPED_BUFFER_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 continue;
                             }
                         }

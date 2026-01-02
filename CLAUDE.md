@@ -137,23 +137,35 @@ com.criticalrange.bassalt/
 
 ```
 bassalt-native/src/
-├── lib.rs           # JNI exports and global state management
+├── lib.rs                  # JNI exports and global state management
 ├── jni/
-│   ├── mod.rs       # JNI utility module (logging, error conversion)
-│   ├── env.rs       # JNIEnv wrapper
-│   ├── strings.rs   # Java/Rust string conversion
-│   └── handles.rs   # Handle management (jlong <-> pointers)
-├── context.rs       # Global wgpu instance/context
-├── adapter.rs       # GPU adapter selection
-├── surface.rs       # Window surface integration
-├── device.rs        # Core GPU device wrapper
-├── buffer.rs        # Buffer management
-├── texture.rs       # Texture and texture view
-├── sampler.rs       # Sampler creation
-├── pipeline.rs      # Render and compute pipelines
-├── shader.rs        # GLSL to WGSL translation (naga)
-├── command.rs       # Command encoding
-└── error.rs         # Error types
+│   ├── mod.rs              # JNI utility module (logging, error conversion)
+│   ├── env.rs              # JNIEnv wrapper
+│   ├── strings.rs          # Java/Rust string conversion
+│   └── handles.rs          # Handle management (jlong <-> pointers)
+├── context.rs              # Global wgpu instance/context
+├── adapter.rs              # GPU adapter selection
+├── surface.rs              # Window surface integration
+├── device.rs               # Core GPU device wrapper
+├── buffer.rs               # Buffer management
+├── texture.rs              # Texture and texture view
+├── texture_and_view.rs     # Extended texture support
+├── sampler.rs              # Sampler creation
+├── pipeline.rs             # Render and compute pipelines
+├── pipeline_registry.rs    # Pipeline caching system
+├── shader.rs               # GLSL to WGSL translation (naga)
+├── command.rs              # Command encoding
+├── render_pass.rs          # Render pass state and recording
+├── bind_group.rs           # Bind group creation and management
+├── bind_group_layouts.rs   # Shared bind group layouts
+├── resource_handles.rs     # Handle storage and validation
+├── range_allocator.rs      # GPU resource range allocation
+├── atlas.rs                # Texture atlas support
+├── render_bundle.rs        # Render bundle encoding
+├── timestamp_queries.rs    # GPU timestamp queries
+├── msaa.rs                 # Multisample anti-aliasing
+├── java_logger.rs          # Java logging bridge
+└── error.rs                # Error types
 ```
 
 ## Key Implementation Details
@@ -261,6 +273,152 @@ pub struct RenderPipelineInfo {
 2. `RenderPipelineInfo` stores the expected binding types
 3. When creating bind groups, resources are matched to slots by type
 4. Textures → Texture slots, Samplers → Sampler slots, Uniforms → Uniform slots
+
+### Pipeline Caching
+
+The `PipelineCache` in `pipeline_registry.rs` provides automatic caching of shader modules and render pipelines:
+
+```rust
+pub struct PipelineCache {
+    shader_modules: RwLock<HashMap<u64, CachedShaderModule>>,
+    render_pipelines: RwLock<HashMap<RenderPipelineKey, CachedRenderPipeline>>,
+    stats: RwLock<CacheStats>,
+}
+```
+
+**Benefits**:
+- Shader modules compiled once and reused
+- Redundant pipeline creations eliminated
+- Faster startup with common pipelines cached
+- Cache statistics for monitoring effectiveness
+
+**Cache Key**: `RenderPipelineKey` includes:
+- Vertex/fragment shader hashes
+- Primitive topology
+- Depth configuration (test, write, compare)
+- Blend state
+- Target format and depth format
+
+### MSAA (Multisample Anti-Aliasing)
+
+MSAA support is implemented in `msaa.rs` with the following features:
+
+```rust
+pub struct MSAAConfig {
+    pub framebuffer_view_id: id::TextureViewId,
+    pub framebuffer_texture_id: id::TextureId,
+    pub sample_count: u32,  // 1, 2, 4, 8, or 16
+    pub format: wgt::TextureFormat,
+    pub width: u32,
+    pub height: u32,
+}
+```
+
+**Java API**:
+```java
+// Query maximum supported samples
+int maxSamples = device.getMaxSupportedSamples(BassaltBackend.FORMAT_BGRA8);
+
+// Create MSAA configuration
+long msaaConfig = device.createMSAAConfig(width, height, format, sampleCount);
+
+// Get actual sample count (may be clamped to max supported)
+int actualSamples = device.getMSAASampleCount(msaaConfig);
+
+// Destroy when done
+device.destroyMSAAConfig(msaaConfig);
+```
+
+### Render Bundles
+
+Render bundles allow recording commands once and replaying them multiple times:
+
+```rust
+// Create a render bundle encoder
+let encoder = create_simple_encoder(&context, device_id, color_format, sample_count)?;
+
+// Record commands (pipeline, vertex buffers, draw calls, etc.)
+// ...
+
+// Finish to get a bundle
+let bundle = encoder.finish(device_id)?;
+```
+
+**Use cases**:
+- Repeated rendering of the same geometry
+- Optimized UI rendering
+- Reduced CPU overhead for common draw patterns
+
+### Timestamp Queries
+
+GPU timestamp queries for performance profiling:
+
+```java
+// Create a query pool
+long queryPool = device.createQueryPool();
+
+// Write timestamps at various points
+device.writeTimestamp(commandEncoder, queryPool, 0);  // Start
+// ... do work ...
+device.writeTimestamp(commandEncoder, queryPool, 1);  // End
+
+// Resolve and read timestamps
+long[] timestamps = device.resolveQueryPool(queryPool, 2);
+```
+
+### Depth Mode Tracking System
+
+Bassalt implements a sophisticated depth mode tracking system that optimizes depth buffer usage based on the pipelines being rendered:
+
+```rust
+enum DepthMode {
+    Unknown,   // Initial state, determined by first pipeline
+    ReadOnly,  // Depth test enabled, no writes (transparent objects)
+    Writable,  // Full depth test and write (opaque geometry)
+    NoDepth,   // No depth attachment needed (GUI, post-processing)
+}
+```
+
+**How it works**:
+
+1. **First Pipeline Determines Mode**: When `record_set_pipeline()` is called for the first time in a render pass, the depth mode is locked based on the pipeline's depth configuration:
+   - If `has_depth_output = false` → `NoDepth` (no depth attachment needed)
+   - If `depth_write_enabled = true` → `Writable` (full depth testing)
+   - If `depth_test_enabled = true` but `depth_write_enabled = false` → `ReadOnly` (depth-only)
+
+2. **Subsequent Pipeline Validation**: Later pipelines are validated for compatibility with the established depth mode. Incompatible pipelines trigger warnings but don't fail (letting wgpu-core validate).
+
+3. **Render Pass Depth Attachment**: When the render pass begins, the depth attachment is configured based on the tracked mode:
+   ```rust
+   let depth_read_only = matches!(self.depth_mode, DepthMode::ReadOnly);
+   let (depth_load_op, depth_store_op) = if depth_read_only {
+       (None, None)  // Read-only: no load/store operations
+   } else {
+       (Some(depth_load_op), Some(wgpu_core::command::StoreOp::Store))
+   };
+   ```
+
+**Benefits**:
+- **Optimized Depth Usage**: Transparent objects can render with read-only depth, allowing proper depth sorting
+- **No Depth for GUI**: Post-processing and GUI rendering doesn't waste resources on unused depth attachments
+- **Validation**: Early warnings about incompatible pipeline combinations
+
+**Example Render Flow**:
+```
+1. Render opaque geometry (depth_mode = Writable)
+   - Depth test: ON
+   - Depth write: ON
+   - Result: Proper depth buffer filled
+
+2. Render transparent objects (depth_mode = ReadOnly, validated)
+   - Depth test: ON (reads from existing depth buffer)
+   - Depth write: OFF
+   - Result: Correct back-to-front sorting
+
+3. Render UI overlay (depth_mode = NoDepth, new render pass)
+   - No depth attachment
+   - Result: UI drawn on top without depth testing
+```
 
 ### macOS-Specific Implementation
 
@@ -449,63 +607,84 @@ cargo build --release --no-default-features --features "dx12,glsl,wgsl"   # Dire
 - **Buffer Creation**: Vertex, index, and uniform buffers
 - **Texture/Sampler Creation**: 2D textures with samplers
 - **Render Pipeline Creation**: From pre-converted WGSL shaders
+- **Pipeline Caching**: Shader modules and render pipelines cached by hash
 - **Shader Reflection**: Extracts binding layout from naga modules
 - **Bind Group System**: Type-aware binding matches shader expectations
+- **Multi-Bind-Group Support**: Separate groups for textures (0), uniforms (1, 2)
 - **Render Pass Recording**: Commands recorded and submitted
 - **Frame Presentation**: Swapchain acquire/present cycle
 - **Per-Pipeline Depth Format Tracking**: `RenderPipelineInfo` tracks expected depth format
+- **Conditional Depth State**: Pipelines without depth output get `depth_stencil: None`
+- **Depth Mode Tracking**: Sophisticated depth write mode tracking per render pass
+  - `ReadOnly`: Depth test enabled, no writes (transparent objects)
+  - `Writable`: Full depth test and write (opaque geometry)
+  - `NoDepth`: No depth attachment needed (GUI, post-processing)
+- **Depth Texture Auto-Creation**: Automatically creates depth textures when MC doesn't provide them
+- **Read-Only Depth Attachments**: Proper `load_op: None, store_op: None` for read-only depth
+- **Pipeline Depth Validation**: Warns when pipelines have incompatible depth modes
 - **Buffer Size Clamping**: Uniform buffers clamped to 64KB limit
 - **Storage Buffer Fallback**: Large buffers (>64KB) use storage buffers
 - **Shader Depth Detection**: `shader_writes_depth()` function analyzes naga module for FragDepth output
+- **Index Buffer Validation**: Validates index count doesn't exceed buffer size
+- **Texture Dimension Re-viewing**: Automatic view creation for dimension mismatches
+- **MSAA Support**: Multisample anti-aliasing with dynamic sample count query
+- **Render Bundles**: Command bundle recording for optimized replay
+- **Timestamp Queries**: GPU timestamp queries for profiling
+- **Depth-Only Render Passes**: Support for shadow rendering and depth pre-passes
 
 ### ⚠️ Known Issues (Non-Fatal)
-1. **Depth Testing Disabled**: All pipelines created without depth_stencil state
-   - Reason: Render pass may/may not have depth attachment
-   - Impact: No depth culling (Z-buffer not used)
-   - Fix: Implement proper depth texture management in render pass creation
-   
-2. **Buffer Size Mismatch** (Causes Yellow Screen): Some shaders expect larger uniform buffers than Minecraft provides
-   - Error: `BindingSizeTooSmall(shader_size: 160, bound_size: 56)`
-   - Cause: WGSL uniform struct is larger than Minecraft's actual data
-   - Impact: Draw calls fail → main framebuffer shows uninitialized memory (yellow)
+1. **Buffer Size Mismatch**: Some shaders may expect larger uniform buffers than Minecraft provides
+   - Error: `BindingSizeTooSmall(shader_size: X, bound_size: Y)`
+   - Cause: WGSL uniform struct may be larger than Minecraft's actual data
+   - Mitigation: Bindings with undersized buffers are skipped (not bound)
    - Fix: Reduce shader uniform sizes to match Minecraft's buffers, or pad buffers
-   
-3. **No Main Framebuffer Detection**: Present() sometimes has nothing to show
-   - Warning: `No main framebuffer detected - nothing to present`
-   - Cause: Render pass targeting non-swapchain texture
-   - Fix needed: Better main render target tracking
 
 ### ✅ Recently Fixed
-1. **Depth Stencil Mismatch**: FIXED by disabling depth in both pipelines AND render passes
-   - Root cause: Pipeline with `depth_stencil: None` + render pass with depth attachment = mismatch error
-   - Solution: Both `depth_stencil` in `lib.rs` AND `depth_stencil_attachment` in `render_pass.rs` set to None
-   - `shader_writes_depth()` function added for future depth detection via naga
+1. **Pipeline Depth State Mismatch** (2024): Fixed by returning `None` for pipelines without depth output
+   - Root cause: Pipelines without depth were creating "no-op" depth_stencil state with `Depth32Float`
+   - Impact: Format mismatch with render passes that had no depth attachment
+   - Solution: `create_depth_stencil_state()` now returns `None` when `PipelineDepthFormat::None`
+   - Result: GUI shaders (no depth output) no longer cause validation errors
 
-2. **Texture Dimension Mismatch**: FIXED by creating new views with expected dimension
-   - Root cause: Shader expects Cube texture but provided D2Array (6 layer cubemap)
-   - Solution: `expected_dimension` added to `BindingLayoutEntry`, `build_with_layout` creates new view if mismatch
-   - Also added `texture_id` to `TextureViewInfo` for re-view creation
+2. **Empty Color Attachment Check** (2024): Fixed to allow depth-only render passes
+   - Root cause: Render pass rejected when `color_attachments.is_empty()`
+   - Impact: Shadow rendering and depth pre-passes failed
+   - Solution: Only reject when BOTH color and depth attachments are empty
+   - Result: Depth-only passes now work correctly
 
-3. **Buffer Range Too Large**: Large buffers now use storage buffer binding type
+3. **Index Buffer Validation** (2024): Added bounds checking for draw calls
+   - Validates `first_index + index_count` doesn't exceed buffer size
+   - Validates offset is within buffer bounds
+   - Prevents out-of-bounds GPU reads
+
+4. **Texture View Creation Error Handling** (2024): Improved failure handling
+   - When view creation fails, binding is now skipped instead of using wrong-dimension view
+   - Prevents validation errors from dimension mismatches
+
+5. **Depth Stencil Mismatch** (earlier): Fixed by ensuring pipeline and render pass agree on depth
+   - `shader_writes_depth()` detects `@builtin(frag_depth)` in fragment shaders
+   - Pipelines without depth output get `depth_stencil: None`
+
+6. **Texture Dimension Mismatch** (earlier): Fixed by creating new views with expected dimension
+   - Shader expects Cube texture but provided D2Array (6 layer cubemap)
+   - `expected_dimension` added to `BindingLayoutEntry`
+   - `build_with_layout()` creates new view if dimension mismatches
+
+7. **Buffer Range Too Large** (earlier): Large buffers now use storage buffer binding type
    - Buffers >64KB are bound as read-only storage buffers instead of uniform buffers
 
-3. **Animation Sprite Shaders**: Fixed MipMapLevel support
-   - `animate_sprite_blit.frag.wgsl` and `animate_sprite_interpolate.frag.wgsl` now use `textureSampleLevel` with proper mipmap level
+8. **Animation Sprite Shaders** (earlier): Fixed MipMapLevel support
+   - `animate_sprite_blit.frag.wgsl` and `animate_sprite_interpolate.frag.wgsl` now use `textureSampleLevel`
 
-4. **Post-Processing Shaders**: All post-processing effects now implemented
+9. **Post-Processing Shaders** (earlier): All post-processing effects implemented
    - Implemented: blit, invert, bits, transparency, color_convolve, entity_sobel, rotscale, spiderclip
-   - Complete depth-based transparency compositing
-   - Spider vision effects with rotation/scaling
-   - Color manipulation and edge detection
 
 ### 🔲 Not Yet Implemented
-- Depth testing (requires proper depth texture management)
-- Compute shaders
-- Multisampling (MSAA)
-- Dynamic uniform buffer slicing
-- Pipeline caching
-- Ray tracing
+- Compute shaders (infrastructure exists, not fully integrated)
+- Dynamic uniform buffer slicing (uses 64KB clamping instead)
+- Ray tracing (WebGPU extension)
 - RGSS (Rotated Grid Super-Sampling) for terrain shader (currently simplified)
+- Pipeline disk caching for faster startup across runs
 
 ## Shader Implementation Status
 
@@ -536,13 +715,12 @@ All post-processing effects implemented:
 1. **Terrain RGSS**: The terrain shader uses simplified nearest-neighbor sampling instead of full RGSS (Rotated Grid Super-Sampling)
    - Original uses complex multi-sample anti-aliasing with derivative-based mip selection
    - Current implementation provides basic functionality without RGSS overhead
-2. **Compute Shaders**: Not yet implemented in native layer
-3. **Multisampling**: Basic MSAA support only
+2. **Compute Shaders**: Infrastructure exists but not fully integrated for terrain generation
 
 ## Known Limitations
 
 1. **Bindless Resources**: Uses bind groups (not bindless textures)
-2. **Uniform Buffer Size**: Minecraft uniform buffers may not match shader expectations
+2. **Uniform Buffer Size**: Minecraft uniform buffers may not match shader expectations (mitigated by skipping undersized bindings)
 
 ## Important Notes and Naming Conventions
 
@@ -562,9 +740,10 @@ All post-processing effects implemented:
 
 ## Future Enhancements
 
-- Compute shader support for terrain generation
+- Full compute shader integration for terrain generation
 - Ray tracing support (WebGPU extension)
 - Async compute pipelines
-- Pipeline caching for faster startup
-- Dynamic uniform buffer management for proper sizing
+- True dynamic uniform buffer slicing (currently uses 64KB clamping)
+- Bindless textures for improved performance
+- Pipeline disk caching for faster startup across runs
 

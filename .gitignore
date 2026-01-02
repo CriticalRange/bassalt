@@ -39,3 +39,9 @@ replay_*.log
 *.hprof
 *.jfr
 bassalt-native/target/
+
+# native libraries (built via gradle, not committed)
+*.so
+*.dll
+*.dylib
+src/main/resources/native/

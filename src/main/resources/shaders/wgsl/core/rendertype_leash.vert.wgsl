@@ -1,4 +1,6 @@
 // Leash vertex shader
+//
+// All bindings in group 0 to match Bassalt's single bind group approach
 
 struct DynamicUniforms {
     model_view: mat4x4<f32>,
@@ -12,8 +14,9 @@ struct ProjectionUniform {
     proj_mat: mat4x4<f32>,
 }
 
-@group(1) @binding(0) var<uniform> uniforms: DynamicUniforms;
-@group(2) @binding(0) var<uniform> projection: ProjectionUniform;
+// Group 0 bindings
+@group(0) @binding(4) var<uniform> uniforms: DynamicUniforms;
+@group(0) @binding(5) var<uniform> projection: ProjectionUniform;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,

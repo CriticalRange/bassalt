@@ -42,11 +42,11 @@ struct Fog {
 @group(0) @binding(5) var<uniform> projection: Projection;
 @group(0) @binding(8) var<uniform> fog: Fog;
 
-// Particle vertex format: POSITION_TEX_COLOR_TEX (has UV2 for lightmap)
+// Particle vertex format: POSITION_COLOR_TEX_TEX (position, color, uv0, uv2)
 struct VertexInput {
     @location(0) position: vec3<f32>,
-    @location(1) uv0: vec2<f32>,
-    @location(2) color: vec4<f32>,
+    @location(1) color: vec4<f32>,
+    @location(2) uv0: vec2<f32>,
     @location(3) uv2_int: vec2<f32>,  // Lightmap integer coords
 }
 

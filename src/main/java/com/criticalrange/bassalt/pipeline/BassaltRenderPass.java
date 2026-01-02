@@ -48,16 +48,6 @@ public class BassaltRenderPass implements RenderPass {
     private static native long createBindGroup0(long devicePtr, long renderPassPtr, long pipelineHandle,
             String[] textureNames, long[] textures, long[] samplers,
             String[] uniformNames, long[] uniforms);
-    
-    // Multi-bind-group support (wgpu-mc style)
-    // Returns first non-zero bind group handle as success indicator
-    // TODO: Return array of bind group handles when JNI array return is implemented
-    private static native long createMultiBindGroups(long devicePtr, long renderPassPtr, long pipelineHandle,
-            String[] textureNames, long[] textures, long[] samplers,
-            String[] uniformNames, long[] uniforms, long[] uniformOffsets, long[] uniformSizes);
-
-    private static native void setBindGroup0(long devicePtr, long renderPassPtr,
-            int index, long bindGroupPtr);
 
     // Native methods for debug groups and markers
     private static native void pushDebugGroup(long renderPassPtr, String label);
@@ -105,11 +95,6 @@ public class BassaltRenderPass implements RenderPass {
         if (name == null)
             return;
 
-        // Debug: log what we're receiving
-        System.out.println("[Bassalt] bindTexture: name=" + name + 
-            ", textureView=" + (textureView != null ? textureView.getClass().getName() : "null") +
-            ", sampler=" + (sampler != null ? sampler.getClass().getName() : "null"));
-
         if (textureView == null) {
             textureBindings.remove(name);
         } else if (textureView instanceof BassaltTextureView) {
@@ -118,7 +103,6 @@ public class BassaltRenderPass implements RenderPass {
                     ? ((BassaltSampler) sampler).getNativePtr()
                     : 0;
             textureBindings.put(name, new TextureBinding(texturePtr, samplerPtr));
-            System.out.println("[Bassalt] bindTexture: Bound texture " + name + " (ptr=" + texturePtr + ", samplerPtr=" + samplerPtr + ")");
         } else {
             System.err.println("[Bassalt] WARNING: textureView is NOT BassaltTextureView! Type: " + textureView.getClass().getName());
         }
@@ -132,7 +116,6 @@ public class BassaltRenderPass implements RenderPass {
 
         if (value instanceof BassaltBuffer) {
             long bufferPtr = ((BassaltBuffer) value).getNativePtr();
-            System.out.println("[Bassalt] setUniform: name=" + name + ", size=" + value.size());
             uniformBindings.put(name, new UniformBinding(bufferPtr, 0, value.size()));
         }
     }
@@ -145,7 +128,6 @@ public class BassaltRenderPass implements RenderPass {
 
         if (value.buffer() instanceof BassaltBuffer) {
             long bufferPtr = ((BassaltBuffer) value.buffer()).getNativePtr();
-            System.out.println("[Bassalt] setUniform (slice): name=" + name + ", offset=" + value.offset() + ", size=" + value.length());
             uniformBindings.put(name, new UniformBinding(bufferPtr, value.offset(), value.length()));
         }
     }
@@ -171,12 +153,10 @@ public class BassaltRenderPass implements RenderPass {
     public void setVertexBuffer(int slot, @Nullable GpuBuffer vertexBuffer) {
         checkClosed();
         if (vertexBuffer == null || !(vertexBuffer instanceof BassaltBuffer)) {
-            System.err.println("[Bassalt] setVertexBuffer SKIPPED: vertexBuffer is null or not BassaltBuffer");
             return;
         }
 
         long bufferPtr = ((BassaltBuffer) vertexBuffer).getNativePtr();
-        System.out.println("[Bassalt] setVertexBuffer: slot=" + slot + ", bufferPtr=" + bufferPtr + ", size=" + vertexBuffer.size());
         device.setVertexBuffer(
                 device.getNativePtr(),
                 nativePassPtr,
@@ -189,13 +169,11 @@ public class BassaltRenderPass implements RenderPass {
     public void setIndexBuffer(@Nullable GpuBuffer indexBuffer, VertexFormat.@Nullable IndexType indexType) {
         checkClosed();
         if (indexBuffer == null || !(indexBuffer instanceof BassaltBuffer)) {
-            System.err.println("[Bassalt] setIndexBuffer SKIPPED: indexBuffer is null or not BassaltBuffer (type=" + indexType + ")");
             return;
         }
 
         long bufferPtr = ((BassaltBuffer) indexBuffer).getNativePtr();
         int type = indexType == VertexFormat.IndexType.INT ? 1 : 0;
-        System.out.println("[Bassalt] setIndexBuffer: bufferPtr=" + bufferPtr + ", type=" + type + " (" + indexType + "), size=" + indexBuffer.size());
 
         device.setIndexBuffer(
                 device.getNativePtr(),
@@ -211,7 +189,6 @@ public class BassaltRenderPass implements RenderPass {
 
         // Skip draw if no valid pipeline
         if (currentPipelineHandle == 0) {
-            System.err.println("[Bassalt] drawIndexed SKIPPED: No valid pipeline set");
             return;
         }
 
@@ -220,11 +197,9 @@ public class BassaltRenderPass implements RenderPass {
 
         // Skip draw if bind group creation failed (pipeline expects bindings we can't provide)
         if (!hasValidBindGroup) {
-            System.err.println("[Bassalt] drawIndexed SKIPPED: No valid bind group");
             return;
         }
 
-        System.out.println("[Bassalt] drawIndexed CALLING NATIVE: indices=" + indexCount + ", nativePassPtr=" + nativePassPtr);
         device.drawIndexed(
                 device.getNativePtr(),
                 nativePassPtr,
@@ -303,14 +278,12 @@ public class BassaltRenderPass implements RenderPass {
     private boolean hasValidBindGroup = false;
 
     /**
-     * Apply current bindings as multiple bind groups (wgpu-mc style)
-     * Group 0: Textures/samplers
-     * Group 1: DynamicTransforms uniform
-     * Group 2: Projection uniform
+     * Apply current bindings as a single bind group
+     * All resources are now in group 0 with different binding indices
      */
     private void applyBindings() {
         hasValidBindGroup = false;
-        
+
         // Convert binding maps to arrays for JNI call
         String[] textureNames = textureBindings.keySet().toArray(new String[0]);
         long[] textures = new long[textureBindings.size()];
@@ -325,26 +298,16 @@ public class BassaltRenderPass implements RenderPass {
 
         String[] uniformNames = uniformBindings.keySet().toArray(new String[0]);
         long[] uniforms = new long[uniformBindings.size()];
-        long[] uniformOffsets = new long[uniformBindings.size()];
-        long[] uniformSizes = new long[uniformBindings.size()];
 
         i = 0;
         for (UniformBinding binding : uniformBindings.values()) {
             uniforms[i] = binding.bufferPtr;
-            uniformOffsets[i] = binding.offset;
-            uniformSizes[i] = binding.size;
             i++;
         }
 
-        // Debug: log what we're trying to bind
-        if (textureBindings.size() > 0 || uniformBindings.size() > 0) {
-            System.out.println("[Bassalt] applyBindings: " + textureBindings.size() + " textures, " + 
-                uniformBindings.size() + " uniforms, pipeline=" + currentPipelineHandle);
-        }
-
-        // Try multi-bind-group approach first (wgpu-mc style)
-        // The native code creates separate bind groups for each group index
-        long multiResult = createMultiBindGroups(
+        // Use single bind group approach (all resources in group 0)
+        // The native createBindGroup0 function now handles setting the bind group on the render pass
+        long bindGroupPtr = createBindGroup0(
                 device.getNativePtr(),
                 nativePassPtr,
                 currentPipelineHandle,
@@ -352,35 +315,14 @@ public class BassaltRenderPass implements RenderPass {
                 textures,
                 samplers,
                 uniformNames,
-                uniforms,
-                uniformOffsets,
-                uniformSizes);
+                uniforms);
 
-        if (multiResult != 0) {
-            // Multi-bind-group succeeded, native code logged the handles
-            // The native code sets up bind groups internally
+        if (bindGroupPtr != 0) {
+            // Bind group was created and set successfully
             hasValidBindGroup = true;
         } else {
-            // Fallback: try single bind group approach
-            long bindGroupPtr = createBindGroup0(
-                    device.getNativePtr(),
-                    nativePassPtr,
-                    currentPipelineHandle,
-                    textureNames,
-                    textures,
-                    samplers,
-                    uniformNames,
-                    uniforms);
-
-            if (bindGroupPtr != 0) {
-                setBindGroup0(device.getNativePtr(), nativePassPtr, 0, bindGroupPtr);
-                hasValidBindGroup = true;
-            } else {
-                // Bind group creation failed - this means pipeline requires bindings we can't provide
-                // Don't set hasValidBindGroup to true - the draw will be skipped
-                hasValidBindGroup = false;
-                System.err.println("[Bassalt] WARNING: Could not create bind groups for pipeline " + currentPipelineHandle);
-            }
+            // Bind group creation failed - pipeline requires bindings we can't provide
+            hasValidBindGroup = false;
         }
     }
 

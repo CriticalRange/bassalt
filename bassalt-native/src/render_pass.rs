@@ -116,6 +116,34 @@ pub struct RenderPassState {
     // Track which bind groups are set (for validation)
     bind_groups_set: [bool; 4],
     pipeline_set: bool,
+
+    // Track max index count for validation (from index buffer size)
+    max_index_count: Option<u64>,
+
+    // Depth write mode tracking
+    // Tracks whether any pipeline in this pass writes to depth
+    // This is used to set the read_only flag on the depth attachment
+    depth_mode: DepthMode,
+
+    // Track if current pipeline is compatible with depth mode
+    // When incompatible, draws are skipped to prevent validation errors
+    pipeline_compatible: bool,
+}
+
+/// Depth write mode for a render pass
+///
+/// This tracks whether the depth attachment should be read-only or writable.
+/// The mode is determined by the first pipeline set in the render pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DepthMode {
+    /// No pipeline set yet (will be determined by first pipeline)
+    Unknown,
+    /// Depth attachment is read-only (pipelines don't write depth)
+    ReadOnly,
+    /// Depth attachment is writable (pipelines write depth)
+    Writable,
+    /// No depth attachment needed (pipelines have no depth output)
+    NoDepth,
 }
 
 impl RenderPassState {
@@ -148,6 +176,15 @@ impl RenderPassState {
             return Err(BasaltError::device_creation(format!("Failed to create command encoder: {:?}", e)));
         }
 
+        // Validate depth clear value is in range [0.0, 1.0]
+        // wgpu-core requires this validation to prevent GPU errors
+        if should_clear_depth && (clear_depth < 0.0 || clear_depth > 1.0) {
+            return Err(BasaltError::device_creation(format!(
+                "Invalid depth clear value: {} (must be in range [0.0, 1.0])",
+                clear_depth
+            )));
+        }
+
         // Convert clear color from u32 ARGB (Minecraft format) to wgt::Color
         let a = ((clear_color >> 24) & 0xFF) as f64 / 255.0;
         let r = ((clear_color >> 16) & 0xFF) as f64 / 255.0;
@@ -173,6 +210,9 @@ impl RenderPassState {
             is_active: true,
             bind_groups_set: [false; 4],
             pipeline_set: false,
+            max_index_count: None,
+            depth_mode: DepthMode::Unknown, // Will be determined by first pipeline
+            pipeline_compatible: true, // Initially true, set false when incompatible pipeline is set
         })
     }
 
@@ -186,8 +226,54 @@ impl RenderPassState {
         self.is_active
     }
 
-    /// Record a set pipeline command
-    pub fn record_set_pipeline(&mut self, pipeline_id: id::RenderPipelineId) {
+    /// Record a set pipeline command and track depth write mode
+    ///
+    /// The depth mode is determined by the first pipeline set in the render pass.
+    /// Subsequent pipelines must be compatible with this mode.
+    pub fn record_set_pipeline(
+        &mut self,
+        pipeline_id: id::RenderPipelineId,
+        depth_write_enabled: bool,
+        depth_test_enabled: bool,
+        has_depth_output: bool,
+    ) {
+        // Determine depth mode on first pipeline set
+        if matches!(self.depth_mode, DepthMode::Unknown) {
+            self.depth_mode = if !has_depth_output {
+                DepthMode::NoDepth
+            } else if depth_write_enabled {
+                DepthMode::Writable
+            } else {
+                // Depth test enabled but no write = read-only
+                DepthMode::ReadOnly
+            };
+            log::info!("First pipeline set: depth_mode={:?} (write={}, test={}, has_depth={})",
+                self.depth_mode, depth_write_enabled, depth_test_enabled, has_depth_output);
+        } else {
+            // Validate compatibility with existing depth mode
+            let expected_mode = if !has_depth_output {
+                DepthMode::NoDepth
+            } else if depth_write_enabled {
+                DepthMode::Writable
+            } else {
+                DepthMode::ReadOnly
+            };
+
+            if self.depth_mode != expected_mode {
+                log::warn!("Pipeline depth mode mismatch: expected {:?}, got {:?}. Skipping this pipeline.",
+                    self.depth_mode, expected_mode);
+                // Mark pipeline as incompatible - draws will be skipped
+                self.pipeline_compatible = false;
+                self.commands.push(RenderCommand::SetPipeline { pipeline_id });
+                self.pipeline_set = true;
+                // Reset bind groups when pipeline changes
+                self.bind_groups_set = [false; 4];
+                return;
+            } else {
+                self.pipeline_compatible = true;
+            }
+        }
+
         self.commands.push(RenderCommand::SetPipeline { pipeline_id });
         self.pipeline_set = true;
         // Reset bind groups when pipeline changes
@@ -252,6 +338,12 @@ impl RenderPassState {
         base_vertex: i32,
         first_instance: u32,
     ) {
+        // Skip draw if pipeline is incompatible with depth mode
+        if !self.pipeline_compatible {
+            log::warn!("DrawIndexed skipped - pipeline incompatible with depth mode");
+            return;
+        }
+
         // Validate state before draw
         if !self.pipeline_set {
             log::warn!("DrawIndexed called without pipeline set!");
@@ -276,6 +368,12 @@ impl RenderPassState {
         first_vertex: u32,
         first_instance: u32,
     ) {
+        // Skip draw if pipeline is incompatible with depth mode
+        if !self.pipeline_compatible {
+            log::warn!("Draw skipped - pipeline incompatible with depth mode");
+            return;
+        }
+
         self.commands.push(RenderCommand::Draw {
             vertex_count,
             instance_count,
@@ -364,6 +462,19 @@ impl RenderPassState {
         );
     }
 
+    /// Set the maximum index count for validation (from index buffer size)
+    ///
+    /// Called when setting the index buffer to track the maximum number of indices
+    /// that can be safely drawn without reading past the end of the buffer.
+    pub fn set_max_index_count(&mut self, count: u64) {
+        self.max_index_count = Some(count);
+    }
+
+    /// Get the maximum index count for validation
+    pub fn get_max_index_count(&self) -> Option<u64> {
+        self.max_index_count
+    }
+
     /// End the render pass and submit to the queue
     ///
     /// Executes all recorded commands using wgpu-core 27's command_encoder_run_render_pass.
@@ -400,28 +511,47 @@ impl RenderPassState {
         }
 
         // Depth attachment - use Clear or Load based on should_clear_depth
-        let depth_stencil_attachment = self.depth_view.map(|view| {
-            let depth_load_op = if self.should_clear_depth {
-                log::info!("Depth attachment: CLEAR with {}", self.clear_depth);
-                wgpu_core::command::LoadOp::Clear(Some(self.clear_depth))
-            } else {
-                log::info!("Depth attachment: LOAD (preserving previous content)");
-                wgpu_core::command::LoadOp::Load
-            };
-            wgpu_core::command::RenderPassDepthStencilAttachment {
-                view,
-                depth: wgpu_core::command::PassChannel {
-                    load_op: Some(depth_load_op),
-                    store_op: Some(wgpu_core::command::StoreOp::Store),
-                    read_only: false,
-                },
-                stencil: wgpu_core::command::PassChannel {
-                    load_op: Some(wgpu_core::command::LoadOp::Clear(Some(self.clear_stencil))),
-                    store_op: Some(wgpu_core::command::StoreOp::Store),
-                    read_only: false,
-                },
-            }
-        });
+        // Determine read_only flag based on tracked depth mode from pipelines
+        // Skip depth attachment entirely when depth_mode is NoDepth (GUI, post-processing)
+        // FIX: Condition was inverted! Create attachment when depth IS needed (not NoDepth)
+        let depth_stencil_attachment = if !matches!(self.depth_mode, DepthMode::NoDepth) && self.depth_view.is_some() {
+            self.depth_view.map(|view| {
+                let depth_load_op = if self.should_clear_depth {
+                    log::info!("Depth attachment: CLEAR with {}", self.clear_depth);
+                    wgpu_core::command::LoadOp::Clear(Some(self.clear_depth))
+                } else {
+                    log::info!("Depth attachment: LOAD (preserving previous content)");
+                    wgpu_core::command::LoadOp::Load
+                };
+
+                // For read-only depth, load_op and store_op must be None
+                let depth_read_only = matches!(self.depth_mode, DepthMode::ReadOnly);
+                let (depth_load_op, depth_store_op) = if depth_read_only {
+                    log::info!("Depth attachment: READ-ONLY mode");
+                    (None, None)
+                } else {
+                    (Some(depth_load_op), Some(wgpu_core::command::StoreOp::Store))
+                };
+
+                log::info!("Depth attachment: read_only={}, depth_mode={:?}", depth_read_only, self.depth_mode);
+                wgpu_core::command::RenderPassDepthStencilAttachment {
+                    view,
+                    depth: wgpu_core::command::PassChannel {
+                        load_op: depth_load_op,
+                        store_op: depth_store_op,
+                        read_only: depth_read_only,
+                    },
+                    stencil: wgpu_core::command::PassChannel {
+                        load_op: Some(wgpu_core::command::LoadOp::Clear(Some(self.clear_stencil))),
+                        store_op: Some(wgpu_core::command::StoreOp::Store),
+                        read_only: false,
+                    },
+                }
+            })
+        } else {
+            log::info!("Skipping depth attachment (depth_mode={:?}, depth_view={:?})", self.depth_mode, self.depth_view.is_some());
+            None
+        };
 
         let desc = wgpu_core::command::RenderPassDescriptor {
             label: Some(Cow::Borrowed("Basalt Render Pass")),
@@ -434,12 +564,21 @@ impl RenderPassState {
         // Take ownership of commands vec to execute them
         let commands = std::mem::take(&mut self.commands);
 
-        if color_attachments.is_empty() {
-            log::error!("No color attachments - render pass has nothing to render to!");
-            return Err(BasaltError::device_creation("No color attachment"));
+        // **FIX**: Allow depth-only render passes (for shadow rendering, etc.)
+        // but reject completely empty passes (no color AND no depth)
+        if color_attachments.is_empty() && depth_stencil_attachment.is_none() {
+            log::error!("No attachments at all - render pass has nothing to render to!");
+            return Err(BasaltError::device_creation("No attachments"));
         }
 
-        log::info!("Beginning render pass with {} color attachments", color_attachments.len());
+        // Warn about depth-only passes (this is unusual but valid)
+        if color_attachments.is_empty() {
+            log::debug!("Depth-only render pass (shadow rendering or depth pre-pass)");
+        }
+
+        log::info!("Beginning render pass with {} color attachments, depth={}",
+            color_attachments.len(),
+            depth_stencil_attachment.is_some());
 
         // Begin render pass
         let (mut render_pass, error) = global.command_encoder_begin_render_pass(
