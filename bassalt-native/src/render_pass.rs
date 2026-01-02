@@ -191,7 +191,10 @@ impl RenderPassState {
         let g = ((clear_color >> 8) & 0xFF) as f64 / 255.0;
         let b = (clear_color & 0xFF) as f64 / 255.0;
 
-        Ok(Self {
+        // Create the render pass state with default viewport and scissor
+        // CRITICAL: WebGPU viewport defaults to (0,0,0,0) which clips everything!
+        // We MUST set viewport to the full render target size
+        let mut state = Self {
             context,
             device_id,
             queue_id,
@@ -213,7 +216,27 @@ impl RenderPassState {
             max_index_count: None,
             depth_mode: DepthMode::Unknown, // Will be determined by first pipeline
             pipeline_compatible: true, // Initially true, set false when incompatible pipeline is set
-        })
+        };
+
+        // IMPORTANT: Set default viewport and scissor rect to the full render target
+        // Without this, the viewport defaults to (0,0,0,0) and nothing renders!
+        state.commands.push(RenderCommand::SetViewport {
+            x: 0.0,
+            y: 0.0,
+            width: width as f32,
+            height: height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        });
+        state.commands.push(RenderCommand::SetScissorRect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        });
+        log::info!("Set default viewport and scissor: {}x{}", width, height);
+
+        Ok(state)
     }
 
     /// Get the command encoder ID
