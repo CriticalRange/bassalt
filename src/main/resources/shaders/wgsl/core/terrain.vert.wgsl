@@ -3,7 +3,7 @@
 //
 // All bindings in group 0 to match Bassalt's single bind group approach
 
-struct DynamicTransforms {
+struct DynamicTransforms_t {
     ModelViewMat: mat4x4<f32>,  // offset 0,  size 64
     ColorModulator: vec4<f32>,   // offset 64, size 16
     ModelOffset: vec3<f32>,      // offset 80, size 12
@@ -11,7 +11,7 @@ struct DynamicTransforms {
     TextureMat: mat4x4<f32>,     // offset 96, size 64
 }  // total: 160 bytes
 
-struct Projection {
+struct Projection_t {
     ProjMat: mat4x4<f32>,        // offset 0, size 64
 }  // total: 64 bytes
 
@@ -42,7 +42,7 @@ struct Globals {
 
 // Fog matches GLSL std140 layout exactly:
 // vec4 FogColor (16) + 6 floats (24) = 40 bytes, rounded to 16-byte boundary = 48 bytes
-struct Fog {
+struct Fog_t {
     FogColor: vec4<f32>,              // offset 0,  size 16
     FogEnvironmentalStart: f32,       // offset 16, size 4
     FogEnvironmentalEnd: f32,         // offset 20, size 4
@@ -59,11 +59,11 @@ struct Fog {
 @group(0) @binding(1) var Sampler0Sampler: sampler;
 @group(0) @binding(2) var Sampler2: texture_2d<f32>;
 @group(0) @binding(3) var Sampler2Sampler: sampler;
-@group(0) @binding(4) var<uniform> transforms: DynamicTransforms;
-@group(0) @binding(5) var<uniform> projection: Projection;
+@group(0) @binding(4) var<uniform> DynamicTransforms: DynamicTransforms_t;
+@group(0) @binding(5) var<uniform> Projection: Projection_t;
 @group(0) @binding(6) var<uniform> chunk_section: ChunkSection;
 @group(0) @binding(7) var<uniform> globals: Globals;
-@group(0) @binding(8) var<uniform> fog: Fog;
+@group(0) @binding(8) var<uniform> Fog: Fog_t;
 
 // Vertex format: POSITION_COLOR_TEX_TEX_NORMAL
 struct VertexInput {
@@ -102,7 +102,7 @@ fn main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
 
     let pos = in.position + vec3<f32>(chunk_section.ChunkPosition - globals.CameraBlockPos) + globals.CameraOffset;
-    out.position = projection.ProjMat * transforms.ModelViewMat * vec4<f32>(pos, 1.0);
+    out.position = Projection.ProjMat * DynamicTransforms.ModelViewMat * vec4<f32>(pos, 1.0);
 
     out.spherical_dist = fog_spherical_distance(pos);
     out.cylindrical_dist = fog_cylindrical_distance(pos);

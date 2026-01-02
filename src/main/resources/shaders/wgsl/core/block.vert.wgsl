@@ -3,7 +3,7 @@
 //
 // All bindings in group 0 to match Bassalt's single bind group approach
 
-struct DynamicTransforms {
+struct DynamicTransforms_t {
     ModelViewMat: mat4x4<f32>,
     ColorModulator: vec4<f32>,
     ModelOffset: vec3<f32>,
@@ -11,12 +11,12 @@ struct DynamicTransforms {
     TextureMat: mat4x4<f32>,
 }
 
-struct Projection {
+struct Projection_t {
     ProjMat: mat4x4<f32>,
 }
 
 // Fog matches GLSL std140 layout exactly (48 bytes)
-struct Fog {
+struct Fog_t {
     FogColor: vec4<f32>,
     FogEnvironmentalStart: f32,
     FogEnvironmentalEnd: f32,
@@ -39,9 +39,9 @@ struct Fog {
 @group(0) @binding(2) var Sampler2: texture_2d<f32>;
 @group(0) @binding(3) var Sampler2Sampler: sampler;
 
-@group(0) @binding(4) var<uniform> transforms: DynamicTransforms;
-@group(0) @binding(5) var<uniform> projection: Projection;
-@group(0) @binding(8) var<uniform> fog: Fog;
+@group(0) @binding(4) var<uniform> DynamicTransforms: DynamicTransforms_t;
+@group(0) @binding(5) var<uniform> Projection: Projection_t;
+@group(0) @binding(8) var<uniform> Fog: Fog_t;
 
 // Vertex format: POSITION_COLOR_TEX_TEX_NORMAL (format 7)
 struct VertexInput {
@@ -79,8 +79,8 @@ fn sample_lightmap(uv: vec2<f32>) -> vec4<f32> {
 fn main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
 
-    let pos = in.position + transforms.ModelOffset;
-    out.position = projection.ProjMat * transforms.ModelViewMat * vec4<f32>(pos, 1.0);
+    let pos = in.position + DynamicTransforms.ModelOffset;
+    out.position = Projection.ProjMat * DynamicTransforms.ModelViewMat * vec4<f32>(pos, 1.0);
 
     out.spherical_dist = fog_spherical_distance(pos);
     out.cylindrical_dist = fog_cylindrical_distance(pos);
