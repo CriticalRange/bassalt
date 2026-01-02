@@ -19,6 +19,8 @@ use wgpu_types as wgt;
 use crate::context::BasaltContext;
 use crate::error::{BasaltError, Result};
 use crate::resource_handles::{BindingLayoutEntry, PipelineDepthFormat};
+use crate::shader_processor;
+use crate::shader_validator;
 
 /// Cache key for a render pipeline
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -154,6 +156,40 @@ impl PipelineCache {
                 column: None,
             })?;
 
+        // Apply enhanced shader processing passes
+        // This includes constant evaluation, bounds checking, terminator validation, etc.
+        let naga_module = shader_processor::process_shader(naga_module)
+            .map_err(|e| BasaltError::ShaderValidation {
+                shader_name: label.to_string(),
+                error: format!("Shader processing error: {:?}", e),
+            })?;
+
+        log::debug!("Shader processing complete for '{}'", label);
+
+        // Run enhanced validation and analysis
+        let validation_report = shader_validator::validate_shader(&naga_module, label)
+            .map_err(|e| BasaltError::ShaderValidation {
+                shader_name: label.to_string(),
+                error: format!("Shader validation error: {:?}", e),
+            })?;
+
+        // Log validation results
+        if !validation_report.warnings.is_empty() {
+            log::warn!("Shader validation warnings for '{}':", label);
+            for warning in &validation_report.warnings {
+                log::warn!("  - {}", warning);
+            }
+        }
+
+        log::debug!("Shader metrics for '{}': functions={}, globals={}, entry_points={}, instructions={}, complexity={}",
+            label,
+            validation_report.metrics.function_count,
+            validation_report.metrics.global_count,
+            validation_report.metrics.entry_point_count,
+            validation_report.metrics.instruction_count,
+            validation_report.metrics.complexity_score,
+        );
+
         // Create shader module descriptor with descriptive label
         let descriptor = pipeline::ShaderModuleDescriptor {
             label: Some(Cow::Owned(format!("Shader: {}", label))),
@@ -191,7 +227,8 @@ impl PipelineCache {
             self.stats.write().total_shaders = shaders.len();
         }
 
-        log::info!("Created and cached shader module: '{}' (hash: {:x})", label, source_hash);
+        log::info!("Created and cached shader module: '{}' (hash: {:x}) - processed with constant eval, bounds check, validation analysis",
+            label, source_hash);
         Ok(module_id)
     }
 

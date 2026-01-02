@@ -16,6 +16,8 @@ mod texture_and_view;
 mod sampler;
 mod pipeline;
 mod shader;
+mod shader_processor;
+mod shader_validator;
 mod command;
 mod error;
 mod resource_handles;
