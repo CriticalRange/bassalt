@@ -397,11 +397,34 @@ impl RenderPassState {
         min_depth: f32,
         max_depth: f32,
     ) {
+        // Validate viewport dimensions against render target size
+        if width > self.viewport_width as f32 || height > self.viewport_height as f32 {
+            log::warn!(
+                "Viewport dimensions ({}, {}) exceed render target ({}, {}) - clamping",
+                width, height, self.viewport_width, self.viewport_height
+            );
+        }
+
+        // Clamp viewport to render target bounds
+        let clamped_width = width.min(self.viewport_width as f32);
+        let clamped_height = height.min(self.viewport_height as f32);
+
+        // Validate depth range
+        if min_depth < 0.0 || min_depth > 1.0 {
+            log::warn!("Viewport min_depth {} is outside [0, 1] range - this may cause issues", min_depth);
+        }
+        if max_depth < 0.0 || max_depth > 1.0 {
+            log::warn!("Viewport max_depth {} is outside [0, 1] range - this may cause issues", max_depth);
+        }
+        if min_depth > max_depth {
+            log::warn!("Viewport min_depth {} > max_depth {} - swapping values", min_depth, max_depth);
+        }
+
         self.commands.push(RenderCommand::SetViewport {
             x,
             y,
-            width,
-            height,
+            width: clamped_width,
+            height: clamped_height,
             min_depth,
             max_depth,
         });

@@ -77,14 +77,6 @@ impl BasaltContext {
             "Basalt Renderer (WebGPU)\nAvailable backends: Vulkan, Metal, DX12, OpenGL"
         )
     }
-
-    /// Get supported backends
-    pub fn supported_backends(&self) -> wgt::Backends {
-        wgt::Backends::VULKAN
-            | wgt::Backends::METAL
-            | wgt::Backends::DX12
-            | wgt::Backends::GL
-    }
 }
 
 impl Default for BasaltContext {
