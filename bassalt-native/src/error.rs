@@ -19,6 +19,24 @@ pub enum BasaltError {
     #[error("WGPU internal error: {0}")]
     Wgpu(String),
 
+    /// Enhanced wgpu error with full context preservation
+    ///
+    /// This variant preserves the original error context from wgpu-core
+    /// instead of losing it in `format!("{:?}", e)` calls.
+    /// Use this for all wgpu-core 27.0 errors to get better debugging.
+    #[error("WGPU error in '{context}': {error}")]
+    WgpuWithContext {
+        /// What operation was being attempted when the error occurred
+        context: String,
+        /// The underlying wgpu-core error message
+        error: String,
+        /// Error type category for filtering/handling
+        error_type: WgpuErrorType,
+        /// Original source error if available
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
+
     #[error("WGPU validation error: {0}")]
     Validation(String),
 
@@ -154,8 +172,124 @@ pub enum BasaltError {
     Internal(String),
 }
 
+/// Error type categories for wgpu-core errors
+///
+/// These categories allow filtering and handling of specific error types
+/// without needing to match on error strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WgpuErrorType {
+    /// Device-level errors (creation, lost, etc.)
+    Device,
+    /// Surface/swapchain errors
+    Surface,
+    /// Shader compilation/validation errors
+    Shader,
+    /// Pipeline creation errors
+    Pipeline,
+    /// Resource creation errors (buffers, textures, etc.)
+    Resource,
+    /// Binding/layout errors
+    Binding,
+    /// Memory allocation errors
+    Memory,
+    /// Validation errors (usage constraints, etc.)
+    Validation,
+    /// Render pass errors
+    RenderPass,
+    /// Unknown or uncategorized error
+    Unknown,
+}
+
+impl WgpuErrorType {
+    /// Infer error type from common error message patterns
+    pub fn from_error_message(msg: &str) -> Self {
+        let msg_lower = msg.to_lowercase();
+
+        if msg_lower.contains("device") || msg_lower.contains("adapter") {
+            Self::Device
+        } else if msg_lower.contains("surface") || msg_lower.contains("swapchain") {
+            Self::Surface
+        } else if msg_lower.contains("shader") || msg_lower.contains("wgsl") {
+            Self::Shader
+        } else if msg_lower.contains("pipeline") || msg_lower.contains("layout") {
+            Self::Pipeline
+        } else if msg_lower.contains("buffer") || msg_lower.contains("texture") {
+            Self::Resource
+        } else if msg_lower.contains("binding") || msg_lower.contains("bind group") {
+            Self::Binding
+        } else if msg_lower.contains("memory") || msg_lower.contains("allocation") {
+            Self::Memory
+        } else if msg_lower.contains("valid") || msg_lower.contains("constraint") {
+            Self::Validation
+        } else if msg_lower.contains("render pass") {
+            Self::RenderPass
+        } else {
+            Self::Unknown
+        }
+    }
+}
+
 // Helper constructors for common error patterns
 impl BasaltError {
+    /// Create an enhanced wgpu error with full context preservation
+    ///
+    /// Use this instead of `Self::Wgpu(format!("{:?}", e))` to preserve
+    /// error context from wgpu-core 27.0.
+    ///
+    /// # Example
+    /// ```rust
+    /// let (buffer_id, error) = context.device_create_buffer(...);
+    /// if let Some(e) = error {
+    ///     return Err(BasaltError::wgpu_context(
+    ///         "buffer creation",
+    ///         format!("{:?}", e),
+    ///     ));
+    /// }
+    /// ```
+    pub fn wgpu_context(context: impl fmt::Display, error: impl fmt::Display) -> Self {
+        let error_str = error.to_string();
+        let error_type = WgpuErrorType::from_error_message(&error_str);
+
+        Self::WgpuWithContext {
+            context: context.to_string(),
+            error: error_str,
+            error_type,
+            source: None,
+        }
+    }
+
+    /// Create an enhanced wgpu error with explicit error type
+    ///
+    /// Use when you know the specific error category for better filtering.
+    pub fn wgpu_context_with_type(
+        context: impl fmt::Display,
+        error: impl fmt::Display,
+        error_type: WgpuErrorType,
+    ) -> Self {
+        Self::WgpuWithContext {
+            context: context.to_string(),
+            error: error.to_string(),
+            error_type,
+            source: None,
+        }
+    }
+
+    /// Create an enhanced wgpu error from a wgpu-core error with source chain
+    pub fn wgpu_context_with_source(
+        context: impl fmt::Display,
+        error: impl fmt::Display,
+        source: Box<dyn std::error::Error + Send + Sync>,
+    ) -> Self {
+        let error_str = error.to_string();
+        let error_type = WgpuErrorType::from_error_message(&error_str);
+
+        Self::WgpuWithContext {
+            context: context.to_string(),
+            error: error_str,
+            error_type,
+            source: Some(source),
+        }
+    }
     /// Create a device creation error
     pub fn device_creation(reason: impl fmt::Display) -> Self {
         Self::DeviceCreation {

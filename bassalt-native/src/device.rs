@@ -4,13 +4,11 @@ use std::borrow::Cow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use wgpu_core::id;
-use wgpu_core::pipeline;
 use wgpu_types as wgt;
 
 use crate::context::BasaltContext;
 use crate::surface::BasaltSurface;
 use crate::pipeline_registry::PipelineCache;
-use crate::pipeline::RenderPipelineDescriptor;
 use crate::error::{BasaltError, Result};
 use crate::bind_group_layouts::{BindGroupLayouts, SharedLayoutCache};
 
@@ -43,23 +41,33 @@ impl FrameTracker {
     }
 
     /// Increment frame counter (called when submitting work)
+    ///
+    /// Uses Release ordering to ensure all prior writes (commands, resources)
+    /// are visible before the frame count increment.
     fn increment(&self) {
-        let count = self.frames_in_flight.fetch_add(1, Ordering::Relaxed) + 1;
+        let count = self.frames_in_flight.fetch_add(1, Ordering::Release) + 1;
         log::debug!("Frame tracker: {} frames in flight (max: {})", count, self.max_frames_in_flight);
     }
 
     /// Decrement frame counter (called when frame completes)
+    ///
+    /// Uses Release ordering to ensure completion updates are visible
+    /// before decrementing the frame count.
     fn decrement(&self) {
-        let count = self.frames_in_flight.fetch_sub(1, Ordering::Relaxed) - 1;
+        let count = self.frames_in_flight.fetch_sub(1, Ordering::Release) - 1;
         log::debug!("Frame tracker: {} frames in flight (max: {})", count, self.max_frames_in_flight);
     }
 
     /// Get current frame count
+    ///
+    /// Uses Acquire ordering to see the most recent frame count updates.
     fn count(&self) -> usize {
-        self.frames_in_flight.load(Ordering::Relaxed)
+        self.frames_in_flight.load(Ordering::Acquire)
     }
 
     /// Check if we need to wait before submitting more work
+    ///
+    /// Uses Acquire ordering to ensure we see the most recent frame count.
     fn should_wait(&self) -> bool {
         self.count() >= self.max_frames_in_flight
     }
@@ -326,7 +334,7 @@ impl BasaltDevice {
         );
 
         if let Some(e) = err {
-            return Err(BasaltError::Wgpu(format!("Failed to create depth texture: {:?}", e)));
+            return Err(BasaltError::wgpu_context("depth texture creation", format!("{:?}", e)));
         }
 
         let view_desc = wgpu_core::resource::TextureViewDescriptor {
@@ -344,7 +352,7 @@ impl BasaltDevice {
         );
 
         if let Some(e) = err {
-            return Err(BasaltError::Wgpu(format!("Failed to create depth view: {:?}", e)));
+            return Err(BasaltError::wgpu_context("depth texture view creation", format!("{:?}", e)));
         }
 
         // Register the view-to-texture mapping
@@ -355,6 +363,65 @@ impl BasaltDevice {
         log::info!("Created and cached depth texture {:?} view {:?} for {}x{}", texture_id, view_id, width, height);
 
         Ok(view_id)
+    }
+
+    /// Clear all cached depth textures to free GPU memory
+    ///
+    /// This should be called when:
+    /// - The window is resized (old-sized depth textures are no longer needed)
+    /// - Memory pressure is detected
+    /// - Explicitly requested by the application
+    ///
+    /// # Example
+    /// ```rust
+    /// device.clear_depth_cache();  // Frees all cached depth textures
+    /// ```
+    pub fn clear_depth_cache(&self) {
+        let mut cache = self.depth_texture_cache.lock();
+        let count = cache.len();
+
+        if count == 0 {
+            log::debug!("Depth cache is already empty");
+            return;
+        }
+
+        log::info!("Clearing depth texture cache ({} entries)", count);
+
+        // Drop old textures/views - wgpu-core will handle actual GPU cleanup
+        for (_, (texture_id, view_id)) in cache.drain() {
+            // Unregister the view-to-texture mapping
+            self.context.unregister_texture_view(view_id);
+
+            // Signal wgpu-core to release resources
+            let _ = self.context.inner().texture_view_drop(view_id);
+            let _ = self.context.inner().texture_drop(texture_id);
+        }
+
+        log::info!("Cleared {} depth textures from cache", count);
+    }
+
+    /// Clear depth textures matching specific dimensions
+    ///
+    /// Useful for cleaning up when resizing the window.
+    pub fn clear_depth_cache_for_size(&self, width: u32, height: u32) {
+        let key = (width, height);
+        let mut cache = self.depth_texture_cache.lock();
+
+        if let Some((texture_id, view_id)) = cache.remove(&key) {
+            log::info!("Clearing depth texture for size {}x{}", width, height);
+
+            // Unregister the view-to-texture mapping
+            self.context.unregister_texture_view(view_id);
+
+            // Signal wgpu-core to release resources
+            let _ = self.context.inner().texture_view_drop(view_id);
+            let _ = self.context.inner().texture_drop(texture_id);
+        }
+    }
+
+    /// Get the number of entries in the depth texture cache
+    pub fn depth_cache_size(&self) -> usize {
+        self.depth_texture_cache.lock().len()
     }
 
     /// Acquire the swapchain texture for rendering
@@ -1687,99 +1754,6 @@ impl BasaltDevice {
         Ok(())
     }
 
-    /// Create a render pipeline
-    pub fn create_render_pipeline(&self, desc: RenderPipelineDescriptor) -> Result<id::RenderPipelineId> {
-        // Parse WGSL shaders
-        let vertex_module = self.parse_wgsl(&desc.vertex_shader)?;
-        let _fragment_module = if let Some(fs) = &desc.fragment_shader {
-            Some(self.parse_wgsl(fs)?)
-        } else {
-            None
-        };
-
-        // Create shader modules
-        let _vs_desc = pipeline::ShaderModuleDescriptor {
-            label: Some(Cow::Borrowed("Vertex Shader")),
-            runtime_checks: wgt::ShaderRuntimeChecks::default(),
-        };
-
-        // Shader module source would be created from the validated module
-        // For now, skip the complex shader module creation
-        let _ = vertex_module; // Mark as used
-
-        // Simplified - full implementation needs proper shader module creation
-        // For now, return a placeholder error
-        Err(BasaltError::shader_compilation(
-            "createRenderPipeline",
-            "Pipeline creation requires full wgpu-core 27 implementation",
-            "unknown",
-        ))
-    }
-
-    /// Begin a render pass - simplified stub
-    pub fn begin_render_pass(
-        &self,
-        _color_view: Option<id::TextureViewId>,
-        _depth_view: Option<id::TextureViewId>,
-        _clear_color: u32,
-        _clear_depth: f32,
-        _clear_stencil: u32,
-        _width: u32,
-        _height: u32,
-    ) -> Result<id::CommandEncoderId> {
-        // Simplified stub - full implementation needs proper render pass setup
-        Err(BasaltError::Generic("Render pass creation requires full wgpu-core 27 implementation".into()))
-    }
-
-    /// Set pipeline for render pass - stub
-    pub fn set_pipeline(
-        &self,
-        _encoder_id: id::CommandEncoderId,
-        _pipeline_id: id::RenderPipelineId,
-    ) -> Result<()> {
-        Ok(())
-    }
-
-    /// Set vertex buffer - stub
-    pub fn set_vertex_buffer(
-        &self,
-        _encoder_id: id::CommandEncoderId,
-        _slot: u32,
-        _buffer_id: id::BufferId,
-        _offset: u64,
-    ) -> Result<()> {
-        Ok(())
-    }
-
-    /// Set index buffer - stub
-    pub fn set_index_buffer(
-        &self,
-        _encoder_id: id::CommandEncoderId,
-        _buffer_id: id::BufferId,
-        _index_type: u32,
-        _offset: u64,
-    ) -> Result<()> {
-        Ok(())
-    }
-
-    /// Draw indexed - stub
-    pub fn draw_indexed(
-        &self,
-        _encoder_id: id::CommandEncoderId,
-        _index_count: u32,
-        _instance_count: u32,
-        _first_index: u32,
-        _base_vertex: i32,
-        _first_instance: u32,
-    ) -> Result<()> {
-        Ok(())
-    }
-
-    /// End render pass and submit - stub
-    pub fn end_render_pass(&self, _encoder_id: id::CommandEncoderId) -> Result<()> {
-        Ok(())
-    }
-
     // Helper functions for type mapping
 
     fn map_buffer_usage(&self, usage: u32) -> wgt::BufferUsages {
@@ -2007,7 +1981,19 @@ impl BasaltDevice {
         const DEPTH32F: u32 = 8;
         const DEPTH24_STENCIL8: u32 = 9;
 
+        // NOTE: sRGB format support
+        // ========================
+        // The current mapping uses non-sRGB formats (Rgba8Unorm, Bgra8Unorm).
+        // For proper color reproduction in rendering, sRGB variants (Rgba8UnormSrgb, Bgra8UnormSrgb)
+        // should be used for the final framebuffer output.
+        //
+        // To enable sRGB support, you can either:
+        // 1. Change the mappings below to use sRGB variants (e.g., Rgba8UnormSrgb)
+        // 2. Add new format constants (e.g., RGBA8_SRGB = 10) and map them to sRGB variants
+        //
+        // Most modern games use sRGB for color-correct rendering, including Minecraft.
         Ok(match format {
+            // Non-sRGB formats (current default)
             RGBA8 => wgt::TextureFormat::Rgba8Unorm,
             BGRA8 => wgt::TextureFormat::Bgra8Unorm,
             RGB8 => wgt::TextureFormat::Rgba8Unorm,
@@ -2129,6 +2115,68 @@ fn build_view_formats(base_format: &wgt::TextureFormat, supported_formats: &[wgt
     view_formats
 }
 
+/// Safely extract NSView* from NSWindow* on macOS
+///
+/// GLFW returns NSWindow* but wgpu-core requires NSView* for Metal surface creation.
+/// This function safely extracts the contentView and validates it before returning.
+///
+/// # Arguments
+/// * `ns_window_ptr` - Raw pointer to NSWindow (from glfwGetCocoaWindow)
+///
+/// # Returns
+/// * `Ok(ptr)` - Valid non-null NSView* pointer
+/// * `Err(...)` - If ns_window_ptr is null or contentView is nil
+#[cfg(target_os = "macos")]
+fn extract_ns_view_safely(ns_window_ptr: u64) -> Result<std::ptr::NonNull<std::ffi::c_void>> {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use std::ptr::NonNull;
+
+    // Validate input pointer is not null
+    let ns_window_raw = ns_window_ptr as *mut AnyObject;
+    if ns_window_raw.is_null() {
+        return Err(BasaltError::surface("NSWindow pointer is null - GLFW window not initialized properly"));
+    }
+
+    // SAFETY: We've verified the pointer is not null above.
+    // The NSWindow reference is borrowed from GLFW and guaranteed valid during this call.
+    let content_view: *mut AnyObject = unsafe {
+        msg_send![ns_window_raw, contentView]
+    };
+
+    // Validate contentView is not nil (Objective-C null)
+    if content_view.is_null() {
+        return Err(BasaltError::surface(
+            "NSWindow.contentView is nil - window may not be fully initialized or was destroyed"
+        ));
+    }
+
+    // Convert to c_void pointer for raw_window_handle
+    let ns_view = content_view as *mut std::ffi::c_void;
+
+    // Final validation - ensure we have a valid NonNull
+    NonNull::new(ns_view)
+        .ok_or_else(|| BasaltError::surface("NSView pointer conversion failed - unexpected null"))
+}
+
+/// Check if current thread is the main thread on macOS
+///
+/// Uses NSThread.isMainThread to determine execution context.
+/// This is needed because Metal surface creation must happen on the main thread.
+#[cfg(target_os = "macos")]
+fn is_main_thread() -> bool {
+    use objc2::msg_send;
+
+    // SAFETY: NSThread class lookup and isMainThread are both safe and
+    // guaranteed to be available on all macOS versions we support.
+    unsafe {
+        let nsthread_class: *const objc2::runtime::AnyClass = objc2::runtime::AnyClass::get("NSThread")
+            .expect("NSThread class not found - Objective-C runtime not available?");
+        let is_main: bool = msg_send![nsthread_class, isMainThread];
+        is_main
+    }
+}
+
 /// Align a value to a given alignment (wgpu utility pattern)
 ///
 /// This is used for calculating proper buffer offsets and sizes that meet
@@ -2153,7 +2201,7 @@ fn align_to(value: u64, alignment: u64) -> u64 {
 pub fn create_device_from_window(
     context: Arc<BasaltContext>,
     window_ptr: u64,
-    display_ptr: u64,
+    _display_ptr: u64,
     _width: u32,
     _height: u32,
 ) -> Result<BasaltDevice> {
@@ -2196,7 +2244,7 @@ pub fn create_device_from_window(
     };
 
     #[cfg(target_os = "macos")]
-    let (raw_window_handle, raw_display_handle) = {
+    let (_raw_window_handle, _raw_display_handle) = {
         use raw_window_handle::{AppKitWindowHandle, AppKitDisplayHandle};
         use std::ptr::NonNull;
 
@@ -2212,47 +2260,29 @@ pub fn create_device_from_window(
     let surface_id = {
         use std::sync::Mutex as StdMutex;
         use std::sync::Arc as StdArc;
-        
+        use raw_window_handle::{AppKitWindowHandle, AppKitDisplayHandle, RawWindowHandle, RawDisplayHandle};
+
         log::info!("macOS: Starting surface creation flow");
-        
+
         // Check if we're already on the main thread to avoid deadlock
-        let is_main_thread = unsafe {
-            use objc2::{msg_send, ClassType};
-            use objc2::runtime::NSObject;
-            
-            // Get NSThread class
-            let nsthread_class: *const objc2::runtime::AnyClass = objc2::runtime::AnyClass::get("NSThread").unwrap();
-            let is_main: bool = msg_send![nsthread_class, isMainThread];
-            is_main
-        };
-        
+        let is_main_thread = is_main_thread();
         log::info!("macOS: Is main thread: {}", is_main_thread);
-        
+
         if is_main_thread {
             // Already on main thread, execute directly
             log::info!("macOS: Already on main thread, executing surface creation directly");
-            
-            use raw_window_handle::{AppKitWindowHandle, AppKitDisplayHandle, RawWindowHandle, RawDisplayHandle};
-            use std::ptr::NonNull;
-            
-            // CRITICAL: glfwGetCocoaWindow returns NSWindow*, but wgpu needs NSView*
-            let ns_view = unsafe {
-                use objc2::runtime::AnyObject;
-                use objc2::msg_send;
-                
-                let ns_window = window_ptr as *mut AnyObject;
-                let content_view: *mut AnyObject = msg_send![ns_window, contentView];
-                content_view as *mut std::ffi::c_void
-            };
-            
-            log::info!("macOS: Got NSWindow at {:p}, contentView at {:p}", 
-                      window_ptr as *const (), ns_view);
-            
-            let window_handle = AppKitWindowHandle::new(NonNull::new(ns_view as *mut _).unwrap());
+
+            // SAFELY extract NSView from NSWindow with proper null checking
+            let ns_view = extract_ns_view_safely(window_ptr)?;
+
+            log::info!("macOS: Successfully extracted NSView at {:p}", ns_view);
+
+            let window_handle = AppKitWindowHandle::new(ns_view);
             let display_handle = AppKitDisplayHandle::new();
             let raw_window_handle = RawWindowHandle::AppKit(window_handle);
             let raw_display_handle = RawDisplayHandle::AppKit(display_handle);
-            
+
+            // SAFETY: Raw window/display handles are valid and have been validated
             let surface_result = unsafe {
                 context.inner().instance_create_surface(
                     raw_display_handle,
@@ -2260,42 +2290,40 @@ pub fn create_device_from_window(
                     None,
                 )
             };
-            
-            surface_result.map_err(|e| BasaltError::surface(format!("Failed to create surface: {:?}", e)))?
+
+            surface_result.map_err(|e| BasaltError::wgpu_context("macOS surface creation", format!("{:?}", e)))?
         } else {
             // On a background thread, dispatch to main
             log::info!("macOS: On background thread, dispatching to main queue");
-            
-            let result: StdArc<StdMutex<Option<std::result::Result<id::SurfaceId, wgpu_core::instance::CreateSurfaceError>>>> = 
+
+            let result: StdArc<StdMutex<Option<std::result::Result<id::SurfaceId, String>>>> =
                 StdArc::new(StdMutex::new(None));
-            
+
             let result_clone = StdArc::clone(&result);
             let context_clone = context.clone();
             let window_ptr_copy = window_ptr;
-            
+
             dispatch::Queue::main().exec_sync(move || {
                 log::info!("macOS: Inside GCD main queue block");
-                
-                use raw_window_handle::{AppKitWindowHandle, AppKitDisplayHandle, RawWindowHandle, RawDisplayHandle};
-                use std::ptr::NonNull;
-                
-                let ns_view = unsafe {
-                    use objc2::runtime::AnyObject;
-                    use objc2::msg_send;
-                    
-                    let ns_window = window_ptr_copy as *mut AnyObject;
-                    let content_view: *mut AnyObject = msg_send![ns_window, contentView];
-                    content_view as *mut std::ffi::c_void
+
+                // SAFELY extract NSView from NSWindow with proper null checking
+                let ns_view = match extract_ns_view_safely(window_ptr_copy) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        // Store the error message - actual error details were logged
+                        *result_clone.lock().unwrap() = Some(Err(e.to_string()));
+                        return;
+                    }
                 };
-                
-                log::info!("macOS: Got NSWindow at {:p}, contentView at {:p}", 
-                          window_ptr_copy as *const (), ns_view);
-                
-                let window_handle = AppKitWindowHandle::new(NonNull::new(ns_view as *mut _).unwrap());
+
+                log::info!("macOS: Successfully extracted NSView at {:p}", ns_view);
+
+                let window_handle = AppKitWindowHandle::new(ns_view);
                 let display_handle = AppKitDisplayHandle::new();
                 let raw_window_handle = RawWindowHandle::AppKit(window_handle);
                 let raw_display_handle = RawDisplayHandle::AppKit(display_handle);
-                
+
+                // SAFETY: Raw window/display handles are valid and have been validated
                 let surface_result = unsafe {
                     context_clone.inner().instance_create_surface(
                         raw_display_handle,
@@ -2303,15 +2331,15 @@ pub fn create_device_from_window(
                         None,
                     )
                 };
-                
-                *result_clone.lock().unwrap() = Some(surface_result);
+
+                *result_clone.lock().unwrap() = Some(surface_result.map_err(|e| e.to_string()));
             });
-            
+
             let surface_id = result.lock()
                 .unwrap()
                 .take()
                 .unwrap()
-                .map_err(|e| BasaltError::surface(format!("Failed to create surface: {:?}", e)))?;
+                .map_err(|e| BasaltError::wgpu_context("macOS surface creation (dispatched)", e))?;
             surface_id
         }
     };
@@ -2324,7 +2352,7 @@ pub fn create_device_from_window(
             raw_window_handle,
             None,
         )
-    }.map_err(|e| BasaltError::surface(format!("Failed to create surface: {:?}", e)))?;
+    }.map_err(|e| BasaltError::wgpu_context("surface creation", format!("{:?}", e)))?;
 
     // Request adapter compatible with the surface
     let adapter_opts = wgpu_core::instance::RequestAdapterOptions {
@@ -2344,10 +2372,27 @@ pub fn create_device_from_window(
         .adapter_features(adapter_id);
 
     // Check if experimental features should be enabled via environment variable
-    // BASALT_EXPERIMENTAL=1 enables experimental features (may have bugs)
+    //
+    // **WARNING: EXPERIMENTAL FEATURES**
+    // ===================================
+    // Setting BASALT_EXPERIMENTAL=1 enables wgpu experimental features that:
+    // - May cause GPU crashes or undefined behavior
+    // - Are not guaranteed to work across all drivers/GPUs
+    // - May have security implications
+    // - Are NOT recommended for production use
+    //
+    // Only enable for:
+    // - Development/testing of new WebGPU features
+    // - Benchmarking experimental capabilities
+    // - Contributing to wgpu development
+    //
     // wgpu 27.0: Experimental features require explicit unsafe opt-in
     let experimental_features = if std::env::var("BASALT_EXPERIMENTAL").as_deref() == Ok("1") {
-        log::warn!("BASALT_EXPERIMENTAL=1: Enabling experimental features - may contain bugs!");
+        log::warn!("========================================");
+        log::warn!("EXPERIMENTAL FEATURES ENABLED!");
+        log::warn!("Stability is NOT guaranteed");
+        log::warn!("DO NOT use in production!");
+        log::warn!("========================================");
         unsafe { wgt::ExperimentalFeatures::enabled() }
     } else {
         wgt::ExperimentalFeatures::disabled()
