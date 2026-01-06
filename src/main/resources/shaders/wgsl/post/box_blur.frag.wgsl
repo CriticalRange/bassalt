@@ -1,4 +1,5 @@
 // Box blur post-processing fragment shader
+// Simple passthrough for now - actual blur implementation pending
 
 @group(0) @binding(0)
 var input_texture: texture_2d<f32>;
@@ -8,6 +9,7 @@ var input_sampler: sampler;
 
 @fragment
 fn main(@location(0) tex_coord: vec2<f32>) -> @location(0) vec4<f32> {
-    // Simple passthrough for now - blur requires uniforms we don't have
+    // Simple passthrough for now
+    // TODO: Implement actual box blur with BlurDir and Radius uniforms
     return textureSample(input_texture, input_sampler, tex_coord);
 }

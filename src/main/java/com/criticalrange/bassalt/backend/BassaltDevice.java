@@ -58,7 +58,23 @@ public class BassaltDevice implements GpuDevice {
 
     private static native long createBufferData(long ptr, byte[] data, int usage);
 
-    public static native void writeBuffer(long ptr, long bufferPtr, byte[] data, long offset);
+    public static void writeBuffer(long ptr, long bufferPtr, byte[] data, long offset) {
+        // DEBUG: Log buffer writes, especially for DynamicTransforms
+        if (data.length >= 80) {  // At least 20 floats (to reach ColorModulator at offset 64)
+            // Try to read as floats
+            java.nio.ByteBuffer bb = java.nio.ByteBuffer.wrap(data).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+            // ColorModulator is at offset 64 bytes = float position 16
+            float colorModR = bb.getFloat(64);
+            float colorModG = bb.getFloat(68);
+            float colorModB = bb.getFloat(72);
+            float colorModA = bb.getFloat(76);
+            System.out.println("[Bassalt DEBUG] writeBuffer: bufferPtr=" + bufferPtr + ", offset=" + offset + ", size=" + data.length +
+                             ", ColorModulator=[" + colorModR + ", " + colorModG + ", " + colorModB + ", " + colorModA + "]");
+        }
+        writeBuffer0(ptr, bufferPtr, data, offset);
+    }
+
+    private static native void writeBuffer0(long ptr, long bufferPtr, byte[] data, long offset);
 
     private static native void destroyBuffer(long ptr, long bufferPtr);
 
@@ -87,7 +103,8 @@ public class BassaltDevice implements GpuDevice {
             int vertexFormat, int primitiveTopology,
             boolean depthTestEnabled, boolean depthWriteEnabled,
             int depthCompare, boolean blendEnabled,
-            int blendColorFactor, int blendAlphaFactor);
+            int blendSrcColorFactor, int blendDstColorFactor,
+            int blendSrcAlphaFactor, int blendDstAlphaFactor);
 
     // Render pass operations
     public static native long beginRenderPass(long ptr, long colorTexture, long depthTexture,
@@ -304,8 +321,10 @@ public class BassaltDevice implements GpuDevice {
         boolean depthWriteEnabled = pipeline.isWriteDepth();
         int depthCompare = getDepthCompareFunction(pipeline.getDepthTestFunction());
         boolean blendEnabled = pipeline.getBlendFunction().isPresent();
-        int blendColorFactor = blendEnabled ? getBlendFactorIndex(pipeline.getBlendFunction().get().sourceColor()) : 0;
-        int blendAlphaFactor = blendEnabled ? getBlendFactorIndex(pipeline.getBlendFunction().get().sourceAlpha()) : 0;
+        int blendSrcColorFactor = blendEnabled ? getBlendFactorIndex(pipeline.getBlendFunction().get().sourceColor()) : 0;
+        int blendDstColorFactor = blendEnabled ? getBlendFactorIndex(pipeline.getBlendFunction().get().destColor()) : 0;
+        int blendSrcAlphaFactor = blendEnabled ? getBlendFactorIndex(pipeline.getBlendFunction().get().sourceAlpha()) : 0;
+        int blendDstAlphaFactor = blendEnabled ? getBlendFactorIndex(pipeline.getBlendFunction().get().destAlpha()) : 0;
 
         // Create the native pipeline from WGSL
         long nativePipelinePtr = createNativePipelineFromWgsl(
@@ -318,8 +337,10 @@ public class BassaltDevice implements GpuDevice {
                 depthWriteEnabled,
                 depthCompare,
                 blendEnabled,
-                blendColorFactor,
-                blendAlphaFactor);
+                blendSrcColorFactor,
+                blendDstColorFactor,
+                blendSrcAlphaFactor,
+                blendDstAlphaFactor);
 
         BassaltCompiledRenderPipeline compiled = new BassaltCompiledRenderPipeline(this, nativePipelinePtr);
         pipelineCache.put(cacheKey, compiled);
@@ -366,6 +387,11 @@ public class BassaltDevice implements GpuDevice {
         // 6 = POSITION_COLOR_TEX_TEX_TEX_NORMAL (position, color, uv0, uv1, uv2,
         // normal)
         String name = format.toString().toLowerCase();
+
+        // DEBUG: Log all vertex format names
+        if (name.contains("position") && (name.contains("color") || name.contains("uv"))) {
+            System.out.println("[Bassalt DEBUG] getVertexFormatIndex: name=" + name);
+        }
 
         // Parse the format string: "vertexformat[position, color, ...]"
         if (name.startsWith("vertexformat[") && name.endsWith("]")) {
@@ -464,6 +490,23 @@ public class BassaltDevice implements GpuDevice {
             case ONE_MINUS_DST_ALPHA -> BassaltBackend.BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
             case CONSTANT_COLOR, CONSTANT_ALPHA, ONE_MINUS_CONSTANT_COLOR, ONE_MINUS_CONSTANT_ALPHA,
                     SRC_ALPHA_SATURATE ->
+                BassaltBackend.BLEND_FACTOR_ONE; // Fallback for less common factors
+        };
+    }
+
+    private int getBlendFactorIndex(com.mojang.blaze3d.platform.DestFactor factor) {
+        return switch (factor) {
+            case ZERO -> BassaltBackend.BLEND_FACTOR_ZERO;
+            case ONE -> BassaltBackend.BLEND_FACTOR_ONE;
+            case SRC_COLOR -> BassaltBackend.BLEND_FACTOR_SRC;
+            case ONE_MINUS_SRC_COLOR -> BassaltBackend.BLEND_FACTOR_ONE_MINUS_SRC;
+            case DST_COLOR -> BassaltBackend.BLEND_FACTOR_DST;
+            case ONE_MINUS_DST_COLOR -> BassaltBackend.BLEND_FACTOR_ONE_MINUS_DST;
+            case SRC_ALPHA -> BassaltBackend.BLEND_FACTOR_SRC_ALPHA;
+            case ONE_MINUS_SRC_ALPHA -> BassaltBackend.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            case DST_ALPHA -> BassaltBackend.BLEND_FACTOR_DST_ALPHA;
+            case ONE_MINUS_DST_ALPHA -> BassaltBackend.BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+            case CONSTANT_COLOR, CONSTANT_ALPHA, ONE_MINUS_CONSTANT_COLOR, ONE_MINUS_CONSTANT_ALPHA ->
                 BassaltBackend.BLEND_FACTOR_ONE; // Fallback for less common factors
         };
     }
@@ -625,10 +668,12 @@ public class BassaltDevice implements GpuDevice {
             int vertexFormat, int primitiveTopology,
             boolean depthTestEnabled, boolean depthWriteEnabled,
             int depthCompare, boolean blendEnabled,
-            int blendColorFactor, int blendAlphaFactor) {
+            int blendSrcColorFactor, int blendDstColorFactor,
+            int blendSrcAlphaFactor, int blendDstAlphaFactor) {
         return createNativePipelineFromWgsl(nativePtr, vertexWgsl, fragmentWgsl,
                 vertexFormat, primitiveTopology, depthTestEnabled, depthWriteEnabled,
-                depthCompare, blendEnabled, blendColorFactor, blendAlphaFactor);
+                depthCompare, blendEnabled, blendSrcColorFactor, blendDstColorFactor,
+                blendSrcAlphaFactor, blendDstAlphaFactor);
     }
 
     // Public access to native render pass methods for BassaltRenderPass

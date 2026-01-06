@@ -22,13 +22,17 @@ struct SwapchainState {
 
 /// Frame-in-flight tracking for proper frame synchronization
 ///
-/// Based on best practices from NVIDIA, Vulkan, and DirectX 12:
-/// - 2 frames in flight with 3 swapchain images (triple buffering)
-/// - Formula: swapchain_images = frames_in_flight + 1
+/// **CRITICAL FIX #2:** Actual GPU synchronization using device.poll()
+///
+/// Based on best practices from wgpu, Vulkan, and DirectX 12:
+/// - Use device.poll() to check actual GPU completion (not just atomic counters)
+/// - Track frames in flight with max limit for triple buffering
+/// - Reset counter when queue is actually empty (not just decrementing)
+/// - See checklist Steps 274, 281, 286-287 for GPU synchronization patterns
 struct FrameTracker {
     /// Number of frames currently submitted to GPU
     frames_in_flight: AtomicUsize,
-    /// Maximum frames allowed before waiting (triple buffering standard)
+    /// Maximum frames allowed before waiting (triple buffering = 2, not 3!)
     max_frames_in_flight: usize,
 }
 
@@ -36,7 +40,7 @@ impl FrameTracker {
     fn new() -> Self {
         Self {
             frames_in_flight: AtomicUsize::new(0),
-            max_frames_in_flight: 2, // Triple buffering standard
+            max_frames_in_flight: 2, // Triple buffering standard (2 frames in flight + 1 swapchain image)
         }
     }
 
@@ -56,6 +60,19 @@ impl FrameTracker {
     fn decrement(&self) {
         let count = self.frames_in_flight.fetch_sub(1, Ordering::Release) - 1;
         log::debug!("Frame tracker: {} frames in flight (max: {})", count, self.max_frames_in_flight);
+    }
+
+    /// **CRITICAL:** Reset frame counter to zero (called when GPU queue is actually empty)
+    ///
+    /// This is more accurate than decrement() because device.poll() can tell us
+    /// when ALL work is done, not just one frame. This prevents counter drift.
+    fn reset_if_empty(&self, is_empty: bool) {
+        if is_empty {
+            let prev_count = self.frames_in_flight.swap(0, Ordering::Release);
+            if prev_count > 0 {
+                log::debug!("Frame tracker: GPU queue empty, resetting {} -> 0", prev_count);
+            }
+        }
     }
 
     /// Get current frame count
@@ -82,8 +99,12 @@ pub struct BasaltDevice {
     surface: Option<BasaltSurface>,
     limits: wgt::Limits,
     info: String,
-    // Lock-free swapchain state (wgpu-mc pattern)
-    swapchain_state: arc_swap::ArcSwap<SwapchainState>,
+    // **CRITICAL FIX #3:** Proper mutex for swapchain state (not lock-free)
+    // Lock-free ArcSwap doesn't provide ordering guarantees between:
+    // - endRenderPass() writes (setting main framebuffer)
+    // - present_frame() reads (getting main framebuffer)
+    // Using Mutex ensures proper synchronization and prevents race conditions
+    swapchain_state: parking_lot::Mutex<SwapchainState>,
     swapchain_format: wgt::TextureFormat,
     // Frame-in-flight tracking for synchronization
     frame_tracker: FrameTracker,
@@ -101,6 +122,8 @@ pub struct BasaltDevice {
     pub pipeline_cache: Arc<PipelineCache>,
     // Shared layout cache for deduplicating bind group layouts
     pub layout_cache: Arc<SharedLayoutCache>,
+    // Track which textures have been rendered to (for automatic first-use clearing)
+    pub(crate) initialized_textures: parking_lot::Mutex<std::collections::HashSet<id::TextureId>>,
 }
 
 impl BasaltDevice {
@@ -161,7 +184,7 @@ impl BasaltDevice {
             surface,
             limits,
             info,
-            swapchain_state: arc_swap::ArcSwap::from(Arc::new(initial_state)),
+            swapchain_state: parking_lot::Mutex::new(initial_state),
             swapchain_format,
             frame_tracker,
             blit_bind_group_layout: parking_lot::Mutex::new(None),
@@ -172,6 +195,7 @@ impl BasaltDevice {
             depth_texture_cache: parking_lot::Mutex::new(std::collections::HashMap::new()),
             pipeline_cache,
             layout_cache,
+            initialized_textures: parking_lot::Mutex::new(std::collections::HashSet::new()),
         })
     }
 
@@ -817,10 +841,13 @@ impl BasaltDevice {
 
     /// Present the current frame
     ///
-    /// Frame synchronization strategy:
+    /// **CRITICAL FIX #2:** Proper GPU synchronization using device.poll()
+    ///
+    /// Frame synchronization strategy (see checklist Steps 271-285):
     /// - Track frames in flight (max 2 for triple buffering)
-    /// - Wait for oldest frame if too many are pending
-    /// - Increment on work submission, decrement when GPU completes
+    /// - Use device.poll() to check ACTUAL GPU completion (not just counters)
+    /// - Reset frame counter when GPU queue is empty (prevents drift)
+    /// - Increment on work submission, reset when GPU confirms completion
     pub fn present_frame(&self) -> Result<()> {
         let surface = match &self.surface {
             Some(s) => s,
@@ -830,32 +857,31 @@ impl BasaltDevice {
             }
         };
 
-        // Frame synchronization: wait if too many frames are in flight
-        // This prevents the CPU from getting too far ahead of the GPU
+        // **CRITICAL FIX #2:** Frame synchronization with actual GPU completion check
+        // If too many frames are in flight, wait for the GPU to complete work
         if self.frame_tracker.should_wait() {
             log::info!("Too many frames in flight ({}/{}), waiting for GPU to complete...",
                 self.frame_tracker.count(), self.frame_tracker.max_frames_in_flight);
 
-            // Wait indefinitely for the GPU to complete some work
-            // This blocks until at least one frame finishes
+            // **CRITICAL:** Use device.poll() to check actual GPU completion status
+            // This is not just a counter - it asks the GPU driver what's actually done
             match self.poll_device(true) {
                 Ok(queue_empty) => {
-                    if queue_empty {
-                        // Queue is empty, all frames completed
-                        log::debug!("GPU queue empty, resetting frame tracker");
-                        // Reset to 0 since all frames are done
-                        while self.frame_tracker.count() > 0 {
-                            self.frame_tracker.decrement();
-                        }
-                    } else {
-                        // At least one frame completed
-                        self.frame_tracker.decrement();
-                        log::debug!("GPU completed one frame, {} frames remaining in flight",
+                    // **CRITICAL FIX #2:** Use reset_if_empty instead of manual decrement
+                    // When device.poll() reports queue empty, ALL frames are done
+                    // This is more accurate than assuming only one frame completed
+                    self.frame_tracker.reset_if_empty(queue_empty);
+
+                    if !queue_empty {
+                        // Queue has work, so at least one frame must have completed
+                        // to make room for new work
+                        log::debug!("GPU has work remaining, {} frames still in flight",
                             self.frame_tracker.count());
                     }
                 }
                 Err(e) => {
                     log::warn!("Failed to wait for GPU: {}, proceeding anyway", e);
+                    // Don't reset counter on error - might cause underflow
                 }
             }
         }
@@ -870,7 +896,8 @@ impl BasaltDevice {
         };
 
         // Get the main framebuffer to blit from (if we have one)
-        let state = self.swapchain_state.load();
+        // **CRITICAL FIX #3:** Use mutex lock for proper synchronization
+        let state = self.swapchain_state.lock();
         if let Some(main_fb) = state.main_framebuffer {
             log::info!("Blitting main framebuffer {:?} to swapchain {:?}", main_fb, swapchain_texture);
 
@@ -1021,14 +1048,10 @@ impl BasaltDevice {
     /// This should be called when a render pass targets a texture that will be presented
     pub fn set_main_framebuffer(&self, texture_id: id::TextureId) {
         log::info!("Explicitly setting main framebuffer to {:?}", texture_id);
-        // Lock-free swap
-        let state = self.swapchain_state.load();
-        let new_state = Arc::new(SwapchainState {
-            main_framebuffer: Some(texture_id),
-            width: state.width,
-            height: state.height,
-        });
-        self.swapchain_state.swap(new_state);
+        // **CRITICAL FIX #3:** Use mutex lock for proper synchronization
+        let mut state = self.swapchain_state.lock();
+        state.main_framebuffer = Some(texture_id);
+        // Mutex guard is released here automatically
     }
 
     /// Set the main framebuffer from a texture view ID
@@ -1264,6 +1287,9 @@ impl BasaltDevice {
             return Err(BasaltError::Wgpu(format!("{:?}", e)));
         }
 
+        log::info!("Created texture {:?}: {}x{}x{} format={:?}",
+            texture_id, width, height, depth, texture_format);
+
         // NOTE: main_framebuffer is now ONLY set by set_main_framebuffer() which is called
         // from endRenderPass() after a render pass completes. We no longer auto-detect it here
         // because intermediate textures (same size as swapchain) were incorrectly being marked
@@ -1383,6 +1409,10 @@ impl BasaltDevice {
     }
 
     /// Write data to texture using queue
+    ///
+    /// **CRITICAL:** WebGPU requires bytes_per_row to be 256-byte aligned for buffer-to-texture copies.
+    /// This function automatically pads the data to meet this requirement.
+    /// See checklist Step 214 for details.
     pub fn write_texture(
         &self,
         texture_id: id::TextureId,
@@ -1390,6 +1420,7 @@ impl BasaltDevice {
         mip_level: u32,
         origin_x: u32,
         origin_y: u32,
+        origin_z: u32,
         width: u32,
         height: u32,
     ) -> Result<()> {
@@ -1399,15 +1430,56 @@ impl BasaltDevice {
             origin: wgt::Origin3d {
                 x: origin_x,
                 y: origin_y,
-                z: 0,
+                z: origin_z,
             },
             aspect: wgt::TextureAspect::All,
         };
 
-        let data_layout = wgt::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(width * 4), // Assuming RGBA8
-            rows_per_image: Some(height),
+        // CRITICAL FIX: Align bytes_per_row to 256 bytes (WebGPU requirement)
+        // See checklist Step 214: bytes_per_row must be multiple of 256 for buffer copies
+        let original_bytes_per_row = width * 4; // RGBA8 = 4 bytes per pixel
+        let aligned_bytes_per_row = ((original_bytes_per_row + 255) & !255) as u32;
+
+        // If data is already aligned, use it directly
+        let (data_to_upload, data_layout) = if original_bytes_per_row == aligned_bytes_per_row {
+            log::trace!("Texture data is already 256-byte aligned ({} bytes/row)", original_bytes_per_row);
+            (Cow::Borrowed(data), wgt::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(original_bytes_per_row),
+                rows_per_image: Some(height),
+            })
+        } else {
+            // Data is not aligned - need to pad each row to 256-byte boundary
+            log::debug!("Padding texture data from {} to {} bytes/row for 256-byte alignment",
+                       original_bytes_per_row, aligned_bytes_per_row);
+
+            let padding_bytes = (aligned_bytes_per_row - original_bytes_per_row) as usize;
+            let padded_size = (aligned_bytes_per_row * height) as usize;
+            let mut padded_data = Vec::with_capacity(padded_size);
+
+            for row in 0..height {
+                let row_start = (row * original_bytes_per_row) as usize;
+                let row_end = row_start + original_bytes_per_row as usize;
+                let row_data = &data[row_start..row_end];
+
+                // Add the actual row data
+                padded_data.extend_from_slice(row_data);
+
+                // Add padding to reach 256-byte boundary
+                if row < height - 1 {
+                    // Don't pad the last row (not needed)
+                    padded_data.extend(std::iter::repeat(0).take(padding_bytes));
+                }
+            }
+
+            log::trace!("Padded texture data: {} -> {} bytes (added {} bytes of padding)",
+                       data.len(), padded_data.len(), padded_data.len() - data.len());
+
+            (Cow::Owned(padded_data), wgt::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(aligned_bytes_per_row),
+                rows_per_image: Some(height),
+            })
         };
 
         let size = wgt::Extent3d {
@@ -1418,7 +1490,7 @@ impl BasaltDevice {
 
         self.context
             .inner()
-            .queue_write_texture(self.queue_id, &texture_copy, data, &data_layout, &size)
+            .queue_write_texture(self.queue_id, &texture_copy, &data_to_upload, &data_layout, &size)
             .map_err(|e| BasaltError::Wgpu(format!("{:?}", e)))?;
 
         Ok(())
@@ -2201,7 +2273,7 @@ fn align_to(value: u64, alignment: u64) -> u64 {
 pub fn create_device_from_window(
     context: Arc<BasaltContext>,
     window_ptr: u64,
-    _display_ptr: u64,
+    display_ptr: u64,
     _width: u32,
     _height: u32,
 ) -> Result<BasaltDevice> {

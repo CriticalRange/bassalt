@@ -81,6 +81,16 @@ public class BassaltRenderPass implements RenderPass {
                 null);
         if (compiled != null && compiled.isValid()) {
             this.currentPipelineHandle = compiled.getNativePtr();
+
+            // DEBUG: Log pipeline location and handle
+            var location = pipeline.getLocation();
+            String locationStr = location != null ? location.toString() : "null";
+            if (locationStr.contains("gui") || locationStr.contains("text")) {
+                System.out.println("[Bassalt DEBUG] setPipeline: location=" + locationStr +
+                                 ", handle=" + compiled.getNativePtr() +
+                                 ", isValid=" + compiled.isValid());
+            }
+
             BassaltDevice.setPipeline(device.getNativePtr(), nativePassPtr, compiled.getNativePtr());
         } else {
             this.currentPipelineHandle = 0;
@@ -117,6 +127,8 @@ public class BassaltRenderPass implements RenderPass {
         if (value instanceof BassaltBuffer) {
             long bufferPtr = ((BassaltBuffer) value).getNativePtr();
             uniformBindings.put(name, new UniformBinding(bufferPtr, 0, value.size()));
+            // DEBUG: Log ALL uniform buffer bindings
+            System.out.println("[Bassalt DEBUG] setUniform(GpuBuffer): name=" + name + ", bufferPtr=" + bufferPtr + ", size=" + value.size());
         }
     }
 
@@ -129,6 +141,8 @@ public class BassaltRenderPass implements RenderPass {
         if (value.buffer() instanceof BassaltBuffer) {
             long bufferPtr = ((BassaltBuffer) value.buffer()).getNativePtr();
             uniformBindings.put(name, new UniformBinding(bufferPtr, value.offset(), value.length()));
+            // DEBUG: Log ALL uniform slice bindings
+            System.out.println("[Bassalt DEBUG] setUniform(GpuBufferSlice): name=" + name + ", bufferPtr=" + bufferPtr + ", offset=" + value.offset() + ", length=" + value.length());
         }
     }
 

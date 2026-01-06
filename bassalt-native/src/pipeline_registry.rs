@@ -39,6 +39,14 @@ pub struct RenderPipelineKey {
     pub depth_compare: wgt::CompareFunction,
     /// Whether blending is enabled
     pub blend_enabled: bool,
+    /// Blend source color factor (if blend enabled)
+    pub blend_src_color_factor: Option<wgt::BlendFactor>,
+    /// Blend destination color factor (if blend enabled)
+    pub blend_dst_color_factor: Option<wgt::BlendFactor>,
+    /// Blend source alpha factor (if blend enabled)
+    pub blend_src_alpha_factor: Option<wgt::BlendFactor>,
+    /// Blend destination alpha factor (if blend enabled)
+    pub blend_dst_alpha_factor: Option<wgt::BlendFactor>,
     /// Target format (color attachment format)
     pub target_format: wgt::TextureFormat,
     /// Depth format (CRITICAL: pipelines with different depth formats are incompatible!)
@@ -297,17 +305,17 @@ impl PipelineCache {
         );
         log::info!("create_depth_stencil_state returned: {:?}", depth_stencil.is_some());
 
-        // Create blend state
+        // Create blend state using actual factors from Java
         let blend = if key.blend_enabled {
             Some(wgt::BlendState {
                 color: wgt::BlendComponent {
-                    src_factor: wgt::BlendFactor::SrcAlpha,
-                    dst_factor: wgt::BlendFactor::OneMinusSrcAlpha,
+                    src_factor: key.blend_src_color_factor.unwrap_or(wgt::BlendFactor::SrcAlpha),
+                    dst_factor: key.blend_dst_color_factor.unwrap_or(wgt::BlendFactor::OneMinusSrcAlpha),
                     operation: wgt::BlendOperation::Add,
                 },
                 alpha: wgt::BlendComponent {
-                    src_factor: wgt::BlendFactor::One,
-                    dst_factor: wgt::BlendFactor::OneMinusSrcAlpha,
+                    src_factor: key.blend_src_alpha_factor.unwrap_or(wgt::BlendFactor::One),
+                    dst_factor: key.blend_dst_alpha_factor.unwrap_or(wgt::BlendFactor::OneMinusSrcAlpha),
                     operation: wgt::BlendOperation::Add,
                 },
             })
@@ -456,9 +464,10 @@ impl PipelineCache {
                     },
                 ]),
             }]),
-            // 1 = POSITION_COLOR (3 floats + 4 floats)
+            // 1 = POSITION_COLOR (3 floats + 4 unsigned bytes)
+            // GUI uses UBYTE colors, not float! Total stride = 16 bytes
             1 => Cow::Owned(vec![wgpu_core::pipeline::VertexBufferLayout {
-                array_stride: 28, // 12 + 16 = 28 bytes
+                array_stride: 16, // 12 + 4 = 16 bytes
                 step_mode: wgt::VertexStepMode::Vertex,
                 attributes: Cow::Owned(vec![
                     wgt::VertexAttribute {
@@ -467,7 +476,7 @@ impl PipelineCache {
                         shader_location: 0,
                     },
                     wgt::VertexAttribute {
-                        format: wgt::VertexFormat::Float32x4,
+                        format: wgt::VertexFormat::Unorm8x4,  // UBYTE colors!
                         offset: 12,
                         shader_location: 1,
                     },
@@ -490,9 +499,10 @@ impl PipelineCache {
                     },
                 ]),
             }]),
-            // 3 = POSITION_TEX_COLOR (3 floats + 2 floats + 4 floats)
+            // 3 = POSITION_TEX_COLOR (3 floats + 2 floats + 4 unsigned bytes)
+            // Color is UBYTE (unsigned bytes), not float! Total stride = 24 bytes
             3 => Cow::Owned(vec![wgpu_core::pipeline::VertexBufferLayout {
-                array_stride: 36, // 12 + 8 + 16 = 36 bytes
+                array_stride: 24, // 12 + 8 + 4 = 24 bytes
                 step_mode: wgt::VertexStepMode::Vertex,
                 attributes: Cow::Owned(vec![
                     wgt::VertexAttribute {
@@ -506,15 +516,16 @@ impl PipelineCache {
                         shader_location: 1,
                     },
                     wgt::VertexAttribute {
-                        format: wgt::VertexFormat::Float32x4,
+                        format: wgt::VertexFormat::Unorm8x4,  // UBYTE colors!
                         offset: 20,
                         shader_location: 2,
                     },
                 ]),
             }]),
-            // 4 = POSITION_TEX_COLOR_NORMAL (3 floats + 2 floats + 4 floats + 3 floats)
+            // 4 = POSITION_TEX_COLOR_NORMAL (3 floats + 2 floats + 4 unsigned bytes + 3 floats)
+            // Color is UBYTE (unsigned bytes), not float! Total stride = 36 bytes
             4 => Cow::Owned(vec![wgpu_core::pipeline::VertexBufferLayout {
-                array_stride: 48, // 12 + 8 + 16 + 12 = 48 bytes
+                array_stride: 36, // 12 + 8 + 4 + 12 = 36 bytes
                 step_mode: wgt::VertexStepMode::Vertex,
                 attributes: Cow::Owned(vec![
                     wgt::VertexAttribute {
@@ -528,20 +539,22 @@ impl PipelineCache {
                         shader_location: 1,
                     },
                     wgt::VertexAttribute {
-                        format: wgt::VertexFormat::Float32x4,
+                        format: wgt::VertexFormat::Unorm8x4,  // UBYTE colors!
                         offset: 20,
                         shader_location: 2,
                     },
                     wgt::VertexAttribute {
                         format: wgt::VertexFormat::Float32x3,
-                        offset: 36,
+                        offset: 24,
                         shader_location: 3,
                     },
                 ]),
             }]),
-            // 5 = POSITION_COLOR_TEX (3 floats + 4 floats + 2 floats)
+            // 5 = POSITION_TEX_COLOR (Position + UV0 + Color)
+            // Memory layout: Position[12] + UV0[8] + Color[4] = 24 bytes
+            // Color is UBYTE (unsigned bytes), not float!
             5 => Cow::Owned(vec![wgpu_core::pipeline::VertexBufferLayout {
-                array_stride: 36, // 12 + 16 + 8 = 36 bytes
+                array_stride: 24, // 12 + 8 + 4 = 24 bytes
                 step_mode: wgt::VertexStepMode::Vertex,
                 attributes: Cow::Owned(vec![
                     wgt::VertexAttribute {
@@ -550,20 +563,21 @@ impl PipelineCache {
                         shader_location: 0, // position
                     },
                     wgt::VertexAttribute {
-                        format: wgt::VertexFormat::Float32x4,
+                        format: wgt::VertexFormat::Float32x2,
                         offset: 12,
-                        shader_location: 1, // color
+                        shader_location: 1, // uv
                     },
                     wgt::VertexAttribute {
-                        format: wgt::VertexFormat::Float32x2,
-                        offset: 28,
-                        shader_location: 2, // uv
+                        format: wgt::VertexFormat::Unorm8x4,  // UBYTE colors!
+                        offset: 20,
+                        shader_location: 2, // color
                     },
                 ]),
             }]),
             // 6 = POSITION_COLOR_TEX_TEX_TEX_NORMAL (position, color, uv0, uv1, uv2, normal)
+            // Color is UBYTE (unsigned bytes), not float! Total stride = 52 bytes
             6 => Cow::Owned(vec![wgpu_core::pipeline::VertexBufferLayout {
-                array_stride: 64, // 12 + 16 + 8 + 8 + 8 + 12 = 64 bytes
+                array_stride: 52, // 12 + 4 + 8 + 8 + 8 + 12 = 52 bytes
                 step_mode: wgt::VertexStepMode::Vertex,
                 attributes: Cow::Owned(vec![
                     wgt::VertexAttribute {
@@ -572,35 +586,36 @@ impl PipelineCache {
                         shader_location: 0, // position
                     },
                     wgt::VertexAttribute {
-                        format: wgt::VertexFormat::Float32x4,
+                        format: wgt::VertexFormat::Unorm8x4,  // UBYTE colors!
                         offset: 12,
                         shader_location: 1, // color
                     },
                     wgt::VertexAttribute {
                         format: wgt::VertexFormat::Float32x2,
-                        offset: 28,
+                        offset: 16,
                         shader_location: 2, // uv0
                     },
                     wgt::VertexAttribute {
                         format: wgt::VertexFormat::Float32x2,
-                        offset: 36,
+                        offset: 24,
                         shader_location: 3, // uv1
                     },
                     wgt::VertexAttribute {
                         format: wgt::VertexFormat::Float32x2,
-                        offset: 44,
+                        offset: 32,
                         shader_location: 4, // uv2
                     },
                     wgt::VertexAttribute {
                         format: wgt::VertexFormat::Float32x3,
-                        offset: 52,
+                        offset: 40,
                         shader_location: 5, // normal
                     },
                 ]),
             }]),
             // 7 = POSITION_COLOR_TEX_TEX_NORMAL (position, color, uv0, uv2, normal - skips uv1)
+            // Color is UBYTE (unsigned bytes), not float! Total stride = 44 bytes
             7 => Cow::Owned(vec![wgpu_core::pipeline::VertexBufferLayout {
-                array_stride: 56, // 12 + 16 + 8 + 8 + 12 = 56 bytes
+                array_stride: 44, // 12 + 4 + 8 + 8 + 12 = 44 bytes
                 step_mode: wgt::VertexStepMode::Vertex,
                 attributes: Cow::Owned(vec![
                     wgt::VertexAttribute {
@@ -609,30 +624,31 @@ impl PipelineCache {
                         shader_location: 0, // position
                     },
                     wgt::VertexAttribute {
-                        format: wgt::VertexFormat::Float32x4,
+                        format: wgt::VertexFormat::Unorm8x4,  // UBYTE colors!
                         offset: 12,
                         shader_location: 1, // color
                     },
                     wgt::VertexAttribute {
                         format: wgt::VertexFormat::Float32x2,
-                        offset: 28,
+                        offset: 16,
                         shader_location: 2, // uv0
                     },
                     wgt::VertexAttribute {
                         format: wgt::VertexFormat::Float32x2,
-                        offset: 36,
+                        offset: 24,
                         shader_location: 3, // uv2
                     },
                     wgt::VertexAttribute {
                         format: wgt::VertexFormat::Float32x3,
-                        offset: 44,
+                        offset: 32,
                         shader_location: 4, // normal
                     },
                 ]),
             }]),
             // 8 = POSITION_COLOR_TEX_TEX (position, color, uv0, uv2 - no normal)
+            // Color is UBYTE (unsigned bytes), not float! Total stride = 32 bytes
             8 => Cow::Owned(vec![wgpu_core::pipeline::VertexBufferLayout {
-                array_stride: 44, // 12 + 16 + 8 + 8 = 44 bytes
+                array_stride: 32, // 12 + 4 + 8 + 8 = 32 bytes
                 step_mode: wgt::VertexStepMode::Vertex,
                 attributes: Cow::Owned(vec![
                     wgt::VertexAttribute {
@@ -641,18 +657,18 @@ impl PipelineCache {
                         shader_location: 0, // position
                     },
                     wgt::VertexAttribute {
-                        format: wgt::VertexFormat::Float32x4,
+                        format: wgt::VertexFormat::Unorm8x4,  // UBYTE colors!
                         offset: 12,
                         shader_location: 1, // color
                     },
                     wgt::VertexAttribute {
                         format: wgt::VertexFormat::Float32x2,
-                        offset: 28,
+                        offset: 16,
                         shader_location: 2, // uv0
                     },
                     wgt::VertexAttribute {
                         format: wgt::VertexFormat::Float32x2,
-                        offset: 36,
+                        offset: 24,
                         shader_location: 3, // uv2
                     },
                 ]),
@@ -748,6 +764,10 @@ impl std::hash::Hash for RenderPipelineKey {
         self.depth_write_enabled.hash(state);
         self.depth_compare.hash(state);
         self.blend_enabled.hash(state);
+        self.blend_src_color_factor.hash(state);
+        self.blend_dst_color_factor.hash(state);
+        self.blend_src_alpha_factor.hash(state);
+        self.blend_dst_alpha_factor.hash(state);
         self.target_format.hash(state);
         self.depth_format.hash(state);  // CRITICAL: Include depth_format in hash!
         self.depth_bias_constant.hash(state);  // Include depth bias in hash
@@ -779,6 +799,10 @@ mod tests {
             depth_write_enabled: false,
             depth_compare: wgt::CompareFunction::Less,
             blend_enabled: false,
+            blend_src_color_factor: None,
+            blend_dst_color_factor: None,
+            blend_src_alpha_factor: None,
+            blend_dst_alpha_factor: None,
             target_format: wgt::TextureFormat::Rgba8UnormSrgb,
             depth_format: PipelineDepthFormat::Depth32Float,
             depth_bias_constant: 0,
@@ -793,6 +817,10 @@ mod tests {
             depth_write_enabled: false,
             depth_compare: wgt::CompareFunction::Less,
             blend_enabled: false,
+            blend_src_color_factor: None,
+            blend_dst_color_factor: None,
+            blend_src_alpha_factor: None,
+            blend_dst_alpha_factor: None,
             target_format: wgt::TextureFormat::Rgba8UnormSrgb,
             depth_format: PipelineDepthFormat::Depth32Float,
             depth_bias_constant: 0,

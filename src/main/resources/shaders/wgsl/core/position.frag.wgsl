@@ -11,6 +11,10 @@ struct DynamicTransforms_t {
     TextureMat: mat4x4<f32>,
 }
 
+struct Projection_t {
+    ProjMat: mat4x4<f32>,
+}
+
 // Fog matches GLSL std140 layout exactly (48 bytes)
 struct Fog_t {
     FogColor: vec4<f32>,
@@ -26,6 +30,7 @@ struct Fog_t {
 
 // Group 0 bindings
 @group(0) @binding(4) var<uniform> DynamicTransforms: DynamicTransforms_t;
+@group(0) @binding(5) var<uniform> Projection: Projection_t;
 @group(0) @binding(8) var<uniform> Fog: Fog_t;
 
 struct FragmentInput {

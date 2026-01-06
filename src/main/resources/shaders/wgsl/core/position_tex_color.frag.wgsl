@@ -16,6 +16,12 @@ struct DynamicTransforms_t {
 @group(0) @binding(1) var Sampler0Sampler: sampler;
 @group(0) @binding(4) var<uniform> DynamicTransforms: DynamicTransforms_t;
 
+struct Projection_t {
+    ProjMat: mat4x4<f32>,
+}
+
+@group(0) @binding(5) var<uniform> Projection: Projection_t;
+
 struct FragmentInput {
     @location(0) tex_coord: vec2<f32>,
     @location(1) vertex_color: vec4<f32>,

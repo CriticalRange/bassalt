@@ -13,6 +13,12 @@ struct DynamicTransforms_t {
 // Group 0 bindings
 @group(0) @binding(4) var<uniform> DynamicTransforms: DynamicTransforms_t;
 
+struct Projection_t {
+    ProjMat: mat4x4<f32>,
+}
+
+@group(0) @binding(5) var<uniform> Projection: Projection_t;
+
 @fragment
 fn main() -> @location(0) vec4<f32> {
     // Use ColorModulator - end portal effect would need more complex shader

@@ -72,6 +72,24 @@ pub fn get_global_context() -> Option<Arc<BasaltContext>> {
     GLOBAL_CONTEXT.get().cloned()
 }
 
+/// Map JNI blend factor index to WebGPU blend factor
+/// Matches BassaltBackend.BLEND_FACTOR_* constants
+fn map_blend_factor_from_jni(factor: jint) -> Option<wgt::BlendFactor> {
+    Some(match factor as u32 {
+        0 => wgt::BlendFactor::Zero,
+        1 => wgt::BlendFactor::One,
+        2 => wgt::BlendFactor::Src,
+        3 => wgt::BlendFactor::OneMinusSrc,
+        4 => wgt::BlendFactor::Dst,
+        5 => wgt::BlendFactor::OneMinusDst,
+        6 => wgt::BlendFactor::SrcAlpha,
+        7 => wgt::BlendFactor::OneMinusSrcAlpha,
+        8 => wgt::BlendFactor::DstAlpha,
+        9 => wgt::BlendFactor::OneMinusDstAlpha,
+        _ => return None, // Unknown factor, return None
+    })
+}
+
 /// Create a device from GLFW window handle
 #[no_mangle]
 pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltBackend_createDevice(
@@ -512,7 +530,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
 
 /// Write data to a buffer
 #[no_mangle]
-pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_writeBuffer(
+pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_writeBuffer0(
     mut env: JNIEnv,
     _class: JClass,
     device_ptr: jlong,
@@ -760,9 +778,10 @@ fn create_vertex_buffer_layout(format_index: usize) -> Cow<'static, [wgpu_core::
                 },
             ]),
         }]),
-        // 1 = POSITION_COLOR (3 floats + 4 floats)
+        // 1 = POSITION_COLOR (3 floats + 4 unsigned bytes)
+        // GUI uses UBYTE colors, not float! Total stride = 16 bytes
         1 => Cow::Owned(vec![wgpu_core::pipeline::VertexBufferLayout {
-            array_stride: 28, // 12 + 16 = 28 bytes
+            array_stride: 16, // 12 + 4 = 16 bytes
             step_mode: wgt::VertexStepMode::Vertex,
             attributes: Cow::Owned(vec![
                 wgt::VertexAttribute {
@@ -771,7 +790,7 @@ fn create_vertex_buffer_layout(format_index: usize) -> Cow<'static, [wgpu_core::
                     shader_location: 0,
                 },
                 wgt::VertexAttribute {
-                    format: wgt::VertexFormat::Float32x4,
+                    format: wgt::VertexFormat::Unorm8x4,  // UBYTE colors!
                     offset: 12,
                     shader_location: 1,
                 },
@@ -794,9 +813,10 @@ fn create_vertex_buffer_layout(format_index: usize) -> Cow<'static, [wgpu_core::
                 },
             ]),
         }]),
-        // 3 = POSITION_TEX_COLOR (3 floats + 2 floats + 4 floats)
+        // 3 = POSITION_TEX_COLOR (3 floats + 2 floats + 4 unsigned bytes)
+        // Color is UBYTE (unsigned bytes), not float! Total stride = 24 bytes
         3 => Cow::Owned(vec![wgpu_core::pipeline::VertexBufferLayout {
-            array_stride: 36, // 12 + 8 + 16 = 36 bytes
+            array_stride: 24, // 12 + 8 + 4 = 24 bytes
             step_mode: wgt::VertexStepMode::Vertex,
             attributes: Cow::Owned(vec![
                 wgt::VertexAttribute {
@@ -810,15 +830,16 @@ fn create_vertex_buffer_layout(format_index: usize) -> Cow<'static, [wgpu_core::
                     shader_location: 1,
                 },
                 wgt::VertexAttribute {
-                    format: wgt::VertexFormat::Float32x4,
+                    format: wgt::VertexFormat::Unorm8x4,  // UBYTE colors!
                     offset: 20,
                     shader_location: 2,
                 },
             ]),
         }]),
-        // 4 = POSITION_TEX_COLOR_NORMAL (3 floats + 2 floats + 4 floats + 3 floats)
+        // 4 = POSITION_TEX_COLOR_NORMAL (3 floats + 2 floats + 4 unsigned bytes + 3 floats)
+        // Color is UBYTE (unsigned bytes), not float! Total stride = 36 bytes
         4 => Cow::Owned(vec![wgpu_core::pipeline::VertexBufferLayout {
-            array_stride: 48, // 12 + 8 + 16 + 12 = 48 bytes
+            array_stride: 36, // 12 + 8 + 4 + 12 = 36 bytes
             step_mode: wgt::VertexStepMode::Vertex,
             attributes: Cow::Owned(vec![
                 wgt::VertexAttribute {
@@ -832,20 +853,22 @@ fn create_vertex_buffer_layout(format_index: usize) -> Cow<'static, [wgpu_core::
                     shader_location: 1,
                 },
                 wgt::VertexAttribute {
-                    format: wgt::VertexFormat::Float32x4,
+                    format: wgt::VertexFormat::Unorm8x4,  // UBYTE colors!
                     offset: 20,
                     shader_location: 2,
                 },
                 wgt::VertexAttribute {
                     format: wgt::VertexFormat::Float32x3,
-                    offset: 36,
+                    offset: 24,
                     shader_location: 3,
                 },
             ]),
         }]),
-        // 5 = POSITION_COLOR_TEX (3 floats + 4 floats + 2 floats)
+        // 5 = POSITION_TEX_COLOR (Position + UV0 + Color)
+        // Memory layout: Position[12] + UV0[8] + Color[4] = 24 bytes
+        // Color is UBYTE (unsigned bytes), not float!
         5 => Cow::Owned(vec![wgpu_core::pipeline::VertexBufferLayout {
-            array_stride: 36, // 12 + 16 + 8 = 36 bytes
+            array_stride: 24, // 12 + 8 + 4 = 24 bytes
             step_mode: wgt::VertexStepMode::Vertex,
             attributes: Cow::Owned(vec![
                 wgt::VertexAttribute {
@@ -854,20 +877,21 @@ fn create_vertex_buffer_layout(format_index: usize) -> Cow<'static, [wgpu_core::
                     shader_location: 0, // position
                 },
                 wgt::VertexAttribute {
-                    format: wgt::VertexFormat::Float32x4,
+                    format: wgt::VertexFormat::Float32x2,
                     offset: 12,
-                    shader_location: 1, // color
+                    shader_location: 1, // uv
                 },
                 wgt::VertexAttribute {
-                    format: wgt::VertexFormat::Float32x2,
-                    offset: 28,
-                    shader_location: 2, // uv
+                    format: wgt::VertexFormat::Unorm8x4,  // UBYTE colors!
+                    offset: 20,
+                    shader_location: 2, // color
                 },
             ]),
         }]),
         // 6 = POSITION_COLOR_TEX_TEX_TEX_NORMAL (position, color, uv0, uv1, uv2, normal)
+        // Color is UBYTE (unsigned bytes), not float! Total stride = 52 bytes
         6 => Cow::Owned(vec![wgpu_core::pipeline::VertexBufferLayout {
-            array_stride: 64, // 12 + 16 + 8 + 8 + 8 + 12 = 64 bytes
+            array_stride: 52, // 12 + 4 + 8 + 8 + 8 + 12 = 52 bytes
             step_mode: wgt::VertexStepMode::Vertex,
             attributes: Cow::Owned(vec![
                 wgt::VertexAttribute {
@@ -876,35 +900,36 @@ fn create_vertex_buffer_layout(format_index: usize) -> Cow<'static, [wgpu_core::
                     shader_location: 0, // position
                 },
                 wgt::VertexAttribute {
-                    format: wgt::VertexFormat::Float32x4,
+                    format: wgt::VertexFormat::Unorm8x4,  // UBYTE colors!
                     offset: 12,
                     shader_location: 1, // color
                 },
                 wgt::VertexAttribute {
                     format: wgt::VertexFormat::Float32x2,
-                    offset: 28,
+                    offset: 16,
                     shader_location: 2, // uv0
                 },
                 wgt::VertexAttribute {
                     format: wgt::VertexFormat::Float32x2,
-                    offset: 36,
+                    offset: 24,
                     shader_location: 3, // uv1
                 },
                 wgt::VertexAttribute {
                     format: wgt::VertexFormat::Float32x2,
-                    offset: 44,
+                    offset: 32,
                     shader_location: 4, // uv2
                 },
                 wgt::VertexAttribute {
                     format: wgt::VertexFormat::Float32x3,
-                    offset: 52,
+                    offset: 40,
                     shader_location: 5, // normal
                 },
             ]),
         }]),
         // 7 = POSITION_COLOR_TEX_TEX_NORMAL (position, color, uv0, uv2, normal - skips uv1)
+        // Color is UBYTE (unsigned bytes), not float! Total stride = 44 bytes
         7 => Cow::Owned(vec![wgpu_core::pipeline::VertexBufferLayout {
-            array_stride: 56, // 12 + 16 + 8 + 8 + 12 = 56 bytes
+            array_stride: 44, // 12 + 4 + 8 + 8 + 12 = 44 bytes
             step_mode: wgt::VertexStepMode::Vertex,
             attributes: Cow::Owned(vec![
                 wgt::VertexAttribute {
@@ -913,30 +938,31 @@ fn create_vertex_buffer_layout(format_index: usize) -> Cow<'static, [wgpu_core::
                     shader_location: 0, // position
                 },
                 wgt::VertexAttribute {
-                    format: wgt::VertexFormat::Float32x4,
+                    format: wgt::VertexFormat::Unorm8x4,  // UBYTE colors!
                     offset: 12,
                     shader_location: 1, // color
                 },
                 wgt::VertexAttribute {
                     format: wgt::VertexFormat::Float32x2,
-                    offset: 28,
+                    offset: 16,
                     shader_location: 2, // uv0
                 },
                 wgt::VertexAttribute {
                     format: wgt::VertexFormat::Float32x2,
-                    offset: 36,
+                    offset: 24,
                     shader_location: 3, // uv2
                 },
                 wgt::VertexAttribute {
                     format: wgt::VertexFormat::Float32x3,
-                    offset: 44,
+                    offset: 32,
                     shader_location: 4, // normal
                 },
             ]),
         }]),
         // 8 = POSITION_COLOR_TEX_TEX (position, color, uv0, uv2 - no normal)
+        // Color is UBYTE (unsigned bytes), not float! Total stride = 32 bytes
         8 => Cow::Owned(vec![wgpu_core::pipeline::VertexBufferLayout {
-            array_stride: 44, // 12 + 16 + 8 + 8 = 44 bytes
+            array_stride: 32, // 12 + 4 + 8 + 8 = 32 bytes
             step_mode: wgt::VertexStepMode::Vertex,
             attributes: Cow::Owned(vec![
                 wgt::VertexAttribute {
@@ -945,18 +971,18 @@ fn create_vertex_buffer_layout(format_index: usize) -> Cow<'static, [wgpu_core::
                     shader_location: 0, // position
                 },
                 wgt::VertexAttribute {
-                    format: wgt::VertexFormat::Float32x4,
+                    format: wgt::VertexFormat::Unorm8x4,  // UBYTE colors!
                     offset: 12,
                     shader_location: 1, // color
                 },
                 wgt::VertexAttribute {
                     format: wgt::VertexFormat::Float32x2,
-                    offset: 28,
+                    offset: 16,
                     shader_location: 2, // uv0
                 },
                 wgt::VertexAttribute {
                     format: wgt::VertexFormat::Float32x2,
-                    offset: 36,
+                    offset: 24,
                     shader_location: 3, // uv2
                 },
             ]),
@@ -1069,13 +1095,17 @@ fn create_layout_from_shaders(
     let mut bindings: BTreeMap<u32, (wgt::BindGroupLayoutEntry, BindingLayoutType, Option<u64>, Option<String>)> = BTreeMap::new();
 
     // Helper to extract bindings from a module (group 0 only)
-    let mut extract_bindings = |module: &naga::Module, layouter: &Layouter, _stage: wgt::ShaderStages| {
+    let mut extract_bindings = |module: &naga::Module, layouter: &Layouter, stage: wgt::ShaderStages| {
+        log::info!("extract_bindings: processing {:?} shader, {} global variables", stage, module.global_variables.len());
         for (_handle, global_var) in module.global_variables.iter() {
             if let Some(binding) = &global_var.binding {
                 // Only process group 0 bindings (single bind group approach)
                 if binding.group != 0 {
+                    log::debug!("  Skipping binding at group {}, binding {} (not group 0)", binding.group, binding.binding);
                     continue;
                 }
+                log::info!("  Found binding {} at group {:?}, name: {:?}, space: {:?}",
+                    binding.binding, binding.group, global_var.name, global_var.space);
                 {
                     let ty = &module.types[global_var.ty];
 
@@ -1177,6 +1207,12 @@ fn create_layout_from_shaders(
     extract_bindings(vertex_module, &vertex_layouter, wgt::ShaderStages::VERTEX);
     extract_bindings(fragment_module, &fragment_layouter, wgt::ShaderStages::FRAGMENT);
 
+    // Log final bindings after merging
+    log::info!("Final merged bindings: {} entries", bindings.len());
+    for (binding_num, (_entry, ty, _min_size, var_name)) in &bindings {
+        log::info!("  Binding {}: {:?}, name: {:?}", binding_num, ty, var_name);
+    }
+
     let global = context.inner();
 
     // Create single bind group layout for group 0
@@ -1264,8 +1300,10 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
     depth_write_enabled: jboolean,
     depth_compare: jint,
     blend_enabled: jboolean,
-    _blend_color_factor: jint,
-    _blend_alpha_factor: jint,
+    blend_src_color_factor: jint,
+    blend_dst_color_factor: jint,
+    blend_src_alpha_factor: jint,
+    blend_dst_alpha_factor: jint,
 ) -> jlong {
     use naga::front;
 
@@ -1370,6 +1408,23 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
         _ => wgt::CompareFunction::Less,
     };
 
+    // Detect post-processing shaders - they should use alpha blending to avoid overwriting GUI
+    // Post-processing shaders typically:
+    // 1. Have "minecraft:post/" in comments (original shader path)
+    // 2. Use "input_texture" or "source_texture" (sampling from previous pass)
+    // 3. Are blur/outline effects that need to blend with existing content
+    let is_post_processing = fragment_wgsl.contains("minecraft:post/") ||
+                             fragment_wgsl.contains("input_texture") ||
+                             fragment_wgsl.contains("source_texture");
+
+    // Force blending on for post-processing shaders to prevent overwriting GUI
+    let effective_blend_enabled = if is_post_processing {
+        log::info!("Detected post-processing shader, forcing alpha blending enabled");
+        true
+    } else {
+        blend_enabled != 0
+    };
+
     // Depth format - check if fragment shader writes depth, otherwise disable depth testing
     // GUI shaders and other 2D shaders don't write depth, so they shouldn't have depth state
     let fragment_naga_module = match naga::front::wgsl::parse_str(&fragment_wgsl) {
@@ -1402,7 +1457,11 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
         depth_test_enabled: depth_test_enabled != 0,
         depth_write_enabled: depth_write_enabled != 0,
         depth_compare,
-        blend_enabled: blend_enabled != 0,
+        blend_enabled: effective_blend_enabled,
+        blend_src_color_factor: if effective_blend_enabled { map_blend_factor_from_jni(blend_src_color_factor) } else { None },
+        blend_dst_color_factor: if effective_blend_enabled { map_blend_factor_from_jni(blend_dst_color_factor) } else { None },
+        blend_src_alpha_factor: if effective_blend_enabled { map_blend_factor_from_jni(blend_src_alpha_factor) } else { None },
+        blend_dst_alpha_factor: if effective_blend_enabled { map_blend_factor_from_jni(blend_dst_alpha_factor) } else { None },
         target_format: wgt::TextureFormat::Rgba8Unorm,
         depth_format,  // CRITICAL: Include depth format in cache key!
         depth_bias_constant: 0,  // TODO: Pass from Java when Minecraft uses depth bias
@@ -1410,6 +1469,9 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
     };
 
     let label = format!("NativePipeline_vfmt{}", vertex_format);
+
+    println!("[Bassalt] Creating pipeline with vertex_format={}, topology={:?}, label={}, depth_test={}, blend={}",
+             vertex_format, primitive_topology, label, depth_test_enabled, blend_enabled);
 
     println!("[Bassalt] Checking pipeline cache for key hash {:x}...", pipeline_registry::PipelineCache::hash_key(&cache_key));
 
@@ -1545,6 +1607,22 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_begi
         tex_id
     });
 
+    // **CRITICAL FIX:** Auto-clear uninitialized textures
+    // If texture hasn't been rendered to before, automatically clear it
+    // This prevents black screen from LOAD on uninitialized textures
+    let (do_clear_color, clear_color_argb) = if let Some(tex_id) = output_texture {
+        let mut initialized = device.initialized_textures.lock();
+        if !do_clear_color && !initialized.contains(&tex_id) {
+            log::info!("Auto-clearing uninitialized texture {:?} (first use)", tex_id);
+            initialized.insert(tex_id);
+            (true, 0xFF000000) // Clear to opaque black
+        } else {
+            (do_clear_color, clear_color_argb)
+        }
+    } else {
+        (do_clear_color, clear_color_argb)
+    };
+
     log::info!("beginRenderPass: should_clear_color={}, should_clear_depth={}, output_texture={:?}",
         do_clear_color, should_clear_depth != 0, output_texture);
 
@@ -1637,8 +1715,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_setV
 
     if let Some(buffer_id) = HANDLES.get_buffer(buffer_handle as u64) {
         state.record_set_vertex_buffer(slot as u32, buffer_id, offset as u64, None);
-        log::debug!("Recorded setVertexBuffer (slot={}, buffer={:?}, offset={})",
-            slot, buffer_id, offset);
+        println!("[Bassalt] setVertexBuffer: slot={}, buffer={:?}, offset={}", slot, buffer_id, offset);
     } else {
         log::error!("setVertexBuffer: Invalid buffer handle: {}", buffer_handle);
     }
@@ -2610,12 +2687,14 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltCommandEnc
         mip_level as u32,
         dest_x as u32,
         dest_y as u32,
+        _depth_or_layer as u32, // Use the depth_or_layer parameter as origin_z for cubemap faces
         width as u32,
         height as u32,
     ) {
         let _ = env.throw_new("java/lang/RuntimeException", &format!("Failed to write texture: {}", e));
     } else {
-        log::debug!("Wrote {}x{} to texture at ({}, {})", width, height, dest_x, dest_y);
+        log::info!("Wrote {}x{} texture data ({} bytes) to texture {:?} at ({}, {}, layer={})",
+                  width, height, data_vec.len(), texture_id, dest_x, dest_y, _depth_or_layer);
     }
 }
 
