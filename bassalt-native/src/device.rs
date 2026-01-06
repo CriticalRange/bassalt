@@ -450,14 +450,13 @@ impl BasaltDevice {
 
     /// Acquire the swapchain texture for rendering
     ///
-    /// Always acquires a fresh swapchain texture each frame to avoid race conditions
-    /// where a cached texture might have already been presented.
+    /// Always acquires a fresh swapchain texture each frame.
+    /// Swapchain textures cannot be reused - once presented, a new one must be acquired.
     pub fn acquire_swapchain_texture(&self) -> Result<id::TextureId> {
         let surface = self.surface.as_ref()
             .ok_or_else(|| BasaltError::surface("No surface available"))?;
 
-        // Always get a fresh swapchain texture - no caching to avoid race conditions
-        // This ensures we never use a texture that's already been presented
+        // Always get a fresh swapchain texture - swapchain textures must be acquired each frame
         let output = self.context.inner().surface_get_current_texture(
             surface.id(),
             None,
@@ -466,7 +465,7 @@ impl BasaltDevice {
         let texture_id = output.texture
             .ok_or_else(|| BasaltError::surface("Swapchain texture not available"))?;
 
-        log::info!("Acquired fresh swapchain texture: {:?}", texture_id);
+        log::info!("Acquired swapchain texture: {:?}", texture_id);
         Ok(texture_id)
     }
 
@@ -2065,10 +2064,10 @@ impl BasaltDevice {
         //
         // Most modern games use sRGB for color-correct rendering, including Minecraft.
         Ok(match format {
-            // Non-sRGB formats (current default)
-            RGBA8 => wgt::TextureFormat::Rgba8Unorm,
-            BGRA8 => wgt::TextureFormat::Bgra8Unorm,
-            RGB8 => wgt::TextureFormat::Rgba8Unorm,
+            // sRGB formats for color-correct rendering (Minecraft expects sRGB)
+            RGBA8 => wgt::TextureFormat::Rgba8UnormSrgb,
+            BGRA8 => wgt::TextureFormat::Bgra8UnormSrgb,
+            RGB8 => wgt::TextureFormat::Rgba8UnormSrgb,
             RG8 => wgt::TextureFormat::Rg8Unorm,
             R8 => wgt::TextureFormat::R8Unorm,
             RGBA16F => wgt::TextureFormat::Rgba16Float,
@@ -2525,19 +2524,19 @@ pub fn create_device_from_window(
         .surface_get_capabilities(surface_id, adapter_id)
         .map_err(|e| BasaltError::surface(format!("Failed to get surface capabilities: {:?}", e)))?;
 
-    // Prefer Bgra8Unorm (standard for most displays, what wgpu-mc uses)
-    // Fall back to Bgra8UnormSrgb, then Rgba variants, then first available
+    // Prefer sRGB formats for correct color rendering (Minecraft expects sRGB)
+    // Try Bgra8UnormSrgb first, then Bgra8Unorm, then Rgba variants
     let surface_format = surface_caps
         .formats
         .iter()
         .copied()
-        .find(|f| matches!(f, wgt::TextureFormat::Bgra8Unorm))
+        .find(|f| matches!(f, wgt::TextureFormat::Bgra8UnormSrgb))
         .or_else(|| {
             surface_caps
                 .formats
                 .iter()
                 .copied()
-                .find(|f| matches!(f, wgt::TextureFormat::Bgra8UnormSrgb))
+                .find(|f| matches!(f, wgt::TextureFormat::Bgra8Unorm))
         })
         .or_else(|| {
             surface_caps

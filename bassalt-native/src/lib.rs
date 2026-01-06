@@ -1112,7 +1112,7 @@ fn create_layout_from_shaders(
                     // Get the variable name from the shader
                     let var_name = global_var.name.clone();
 
-                    let (binding_type, layout_type, min_size) = match global_var.space {
+                    let (binding_type, layout_type, min_size, binding_var_name) = match global_var.space {
                         naga::AddressSpace::Uniform => {
                             // Calculate the actual size of the uniform buffer struct
                             let type_layout = layouter[global_var.ty];
@@ -1127,7 +1127,7 @@ fn create_layout_from_shaders(
                                 ty: wgt::BufferBindingType::Uniform,
                                 has_dynamic_offset: false,
                                 min_binding_size,
-                            }, BindingLayoutType::UniformBuffer, Some(struct_size))
+                            }, BindingLayoutType::UniformBuffer, Some(struct_size), var_name.clone())
                         }
                         naga::AddressSpace::Storage { access: _ } => {
                             // Storage buffer (like wgpu-mc uses for uniforms/projection)
@@ -1143,7 +1143,7 @@ fn create_layout_from_shaders(
                                 ty: wgt::BufferBindingType::Storage { read_only: true },
                                 has_dynamic_offset: false,
                                 min_binding_size,
-                            }, BindingLayoutType::StorageBuffer, Some(struct_size))
+                            }, BindingLayoutType::StorageBuffer, Some(struct_size), var_name.clone())
                         }
                         naga::AddressSpace::Handle => {
                             // Check if it's a texture or sampler
@@ -1159,16 +1159,17 @@ fn create_layout_from_shaders(
                                         (naga::ImageDimension::Cube, true) => wgt::TextureViewDimension::CubeArray,
                                         _ => wgt::TextureViewDimension::D2, // Default fallback
                                     };
-                                    log::info!("Found texture at binding {}: dimension {:?} (naga dim={:?}, arrayed={})", binding.binding, view_dimension, dim, arrayed);
+                                    log::info!("Found texture at binding {}: dimension {:?} (naga dim={:?}, arrayed={}), name={:?})", binding.binding, view_dimension, dim, arrayed, var_name);
                                     (wgt::BindingType::Texture {
                                         sample_type: wgt::TextureSampleType::Float { filterable: true },
                                         view_dimension,
                                         multisampled: false,
-                                    }, BindingLayoutType::Texture, None)
+                                    }, BindingLayoutType::Texture, None, var_name.clone())
                                 }
                                 naga::TypeInner::Sampler { .. } => {
+                                    log::info!("Found sampler at binding {}: name={:?}", binding.binding, var_name);
                                     (wgt::BindingType::Sampler(wgt::SamplerBindingType::Filtering),
-                                     BindingLayoutType::Sampler, None)
+                                     BindingLayoutType::Sampler, None, var_name.clone())
                                 }
                                 _ => continue, // Skip unsupported types
                             }
@@ -1197,7 +1198,7 @@ fn create_layout_from_shaders(
                             visibility,
                             ty: binding_type,
                             count: None,
-                        }, layout_type, min_size, var_name.clone()));
+                        }, layout_type, min_size, binding_var_name));
                 }
             }
         }
@@ -1462,7 +1463,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
         blend_dst_color_factor: if effective_blend_enabled { map_blend_factor_from_jni(blend_dst_color_factor) } else { None },
         blend_src_alpha_factor: if effective_blend_enabled { map_blend_factor_from_jni(blend_src_alpha_factor) } else { None },
         blend_dst_alpha_factor: if effective_blend_enabled { map_blend_factor_from_jni(blend_dst_alpha_factor) } else { None },
-        target_format: wgt::TextureFormat::Rgba8Unorm,
+        target_format: wgt::TextureFormat::Rgba8UnormSrgb,  // Use sRGB for color-correct rendering
         depth_format,  // CRITICAL: Include depth format in cache key!
         depth_bias_constant: 0,  // TODO: Pass from Java when Minecraft uses depth bias
         depth_bias_slope_scale: 0,  // TODO: Pass from Java when Minecraft uses depth bias (stored as f32 bits)
@@ -1968,6 +1969,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_endR
 
 /// Create a bind group from arrays of texture, sampler, and uniform bindings
 /// Now takes a pipeline_handle to retrieve the correct bind group layout
+/// Also takes uniform_offsets and uniform_sizes to properly bind buffer slices
 #[no_mangle]
 pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass_createBindGroup0(
     mut env: JNIEnv,
@@ -1980,6 +1982,8 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
     sampler_handles: JObject,
     uniform_names: JObject,
     uniform_handles: JObject,
+    uniform_offsets: JObject,
+    uniform_sizes: JObject,
 ) -> jlong {
     if device_ptr == 0 {
         let _ = env.throw_new("java/lang/IllegalArgumentException", "Null device pointer");
@@ -2079,16 +2083,16 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
                         // This maintains compatibility with older code paths
                         if slot.is_none() {
                             log::debug!("No name match for texture '{}', using sequential assignment", mc_name);
-                            // Count how many texture bindings we've already assigned
-                            let assigned_count = texture_count.saturating_sub(texture_count - i);
-                            Some(assigned_count as u32 * 2) // Texture+sampler pairs use even numbers
+                            // Use the current index to determine the binding slot
+                            // Each texture+sampler pair uses 2 slots (texture at even, sampler at odd)
+                            Some(i as u32 * 2)
                         } else {
                             slot
                         }
                     } else {
                         // No pipeline info or no name provided - use sequential assignment
-                        let assigned_count = texture_count.saturating_sub(texture_count - i);
-                        Some(assigned_count as u32 * 2)
+                        // Each texture+sampler pair uses 2 slots (texture at even, sampler at odd)
+                        Some(i as u32 * 2)
                     };
 
                     if let Some(slot) = binding_slot {
@@ -2141,6 +2145,8 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
     if !uniform_handles.is_null() && !uniform_names.is_null() {
         let unif_array: ::jni::objects::JPrimitiveArray<i64> = uniform_handles.into();
         let names_array: ::jni::objects::JObjectArray = uniform_names.into();
+        let offsets_array: ::jni::objects::JPrimitiveArray<i64> = uniform_offsets.into();
+        let sizes_array: ::jni::objects::JPrimitiveArray<i64> = uniform_sizes.into();
 
         let uniform_count = match env.get_array_length(&unif_array) {
             Ok(len) => len as usize,
@@ -2254,8 +2260,25 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
                     };
 
                     if let Some(slot) = binding_slot {
-                        log::info!("Mapping uniform '{}' to binding slot {}", mc_name, slot);
-                        builder = builder.add_uniform_buffer(slot, buffer_info.id, 0, buffer_info.size);
+                        // Get offset and size for this uniform buffer slice
+                        let mut offset_buf = [0i64; 1];
+                        let mut size_buf = [0i64; 1];
+
+                        let offset = if env.get_long_array_region(&offsets_array, i as i32, &mut offset_buf).is_ok() {
+                            offset_buf[0] as u64
+                        } else {
+                            0
+                        };
+
+                        let size = if env.get_long_array_region(&sizes_array, i as i32, &mut size_buf).is_ok() {
+                            size_buf[0] as u64
+                        } else {
+                            buffer_info.size
+                        };
+
+                        log::info!("Mapping uniform '{}' to binding slot {} (offset={}, size={})",
+                                  mc_name, slot, offset, size);
+                        builder = builder.add_uniform_buffer(slot, buffer_info.id, offset, size);
                     } else {
                         log::warn!("Failed to map uniform '{}' to any binding slot", mc_name);
                     }

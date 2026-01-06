@@ -47,7 +47,7 @@ public class BassaltRenderPass implements RenderPass {
     // pipeline_handle is required to use the correct bind group layout
     private static native long createBindGroup0(long devicePtr, long renderPassPtr, long pipelineHandle,
             String[] textureNames, long[] textures, long[] samplers,
-            String[] uniformNames, long[] uniforms);
+            String[] uniformNames, long[] uniforms, long[] uniformOffsets, long[] uniformSizes);
 
     // Native methods for debug groups and markers
     private static native void pushDebugGroup(long renderPassPtr, String label);
@@ -107,12 +107,16 @@ public class BassaltRenderPass implements RenderPass {
 
         if (textureView == null) {
             textureBindings.remove(name);
+            // DEBUG: Log texture unbinding
+            System.out.println("[Bassalt DEBUG] bindTexture: name=" + name + ", textureView=null (UNBIND)");
         } else if (textureView instanceof BassaltTextureView) {
             long texturePtr = ((BassaltTextureView) textureView).getNativePtr();
             long samplerPtr = sampler != null && sampler instanceof BassaltSampler
                     ? ((BassaltSampler) sampler).getNativePtr()
                     : 0;
             textureBindings.put(name, new TextureBinding(texturePtr, samplerPtr));
+            // DEBUG: Log ALL texture bindings
+            System.out.println("[Bassalt DEBUG] bindTexture: name=" + name + ", texturePtr=" + texturePtr + ", samplerPtr=" + samplerPtr);
         } else {
             System.err.println("[Bassalt] WARNING: textureView is NOT BassaltTextureView! Type: " + textureView.getClass().getName());
         }
@@ -310,12 +314,27 @@ public class BassaltRenderPass implements RenderPass {
             i++;
         }
 
+        // DEBUG: Log texture bindings being applied (AFTER population)
+        if (textureNames.length > 0) {
+            StringBuilder sb = new StringBuilder("[Bassalt DEBUG] applyBindings: textures=[");
+            for (int j = 0; j < textureNames.length; j++) {
+                if (j > 0) sb.append(", ");
+                sb.append(textureNames[j]).append("=").append(textures[j]);
+            }
+            sb.append("]");
+            System.out.println(sb.toString());
+        }
+
         String[] uniformNames = uniformBindings.keySet().toArray(new String[0]);
         long[] uniforms = new long[uniformBindings.size()];
+        long[] uniformOffsets = new long[uniformBindings.size()];
+        long[] uniformSizes = new long[uniformBindings.size()];
 
         i = 0;
         for (UniformBinding binding : uniformBindings.values()) {
             uniforms[i] = binding.bufferPtr;
+            uniformOffsets[i] = binding.offset;
+            uniformSizes[i] = binding.size;
             i++;
         }
 
@@ -329,7 +348,12 @@ public class BassaltRenderPass implements RenderPass {
                 textures,
                 samplers,
                 uniformNames,
-                uniforms);
+                uniforms,
+                uniformOffsets,
+                uniformSizes);
+
+        // DEBUG: Log bind group creation result
+        System.out.println("[Bassalt DEBUG] applyBindings: bindGroupPtr=" + bindGroupPtr + ", hasValidBindGroup=" + (bindGroupPtr != 0));
 
         if (bindGroupPtr != 0) {
             // Bind group was created and set successfully
