@@ -2287,7 +2287,7 @@ pub fn create_device_from_window(
     use raw_window_handle::{RawWindowHandle, RawDisplayHandle};
 
     // Create raw window and display handles from the GLFW window pointer
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     let (raw_window_handle, raw_display_handle) = {
         use std::ptr::NonNull;
         use raw_window_handle::{XlibWindowHandle, XlibDisplayHandle};

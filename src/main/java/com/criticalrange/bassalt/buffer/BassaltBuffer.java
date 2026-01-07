@@ -2,6 +2,8 @@ package com.criticalrange.bassalt.buffer;
 
 import com.criticalrange.bassalt.backend.BassaltDevice;
 import com.mojang.blaze3d.buffers.GpuBuffer;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.lwjgl.system.MemoryUtil;
 
 import java.nio.ByteBuffer;
@@ -16,6 +18,8 @@ import java.nio.ByteBuffer;
  * - Only discarded when the GPU buffer itself is closed
  */
 public class BassaltBuffer extends GpuBuffer {
+
+    private static final Logger LOGGER = LogManager.getLogger("Bassalt");
 
     private final BassaltDevice device;
     private final long nativePtr;
@@ -33,9 +37,6 @@ public class BassaltBuffer extends GpuBuffer {
         super(usage, size);
         this.device = device;
         this.nativePtr = nativePtr;
-
-        // Debug: Log when a new BassaltBuffer is created
-        System.out.println("[Bassalt DEBUG] BassaltBuffer created: nativePtr=" + nativePtr + ", size=" + size);
     }
 
     @Override
@@ -93,14 +94,12 @@ public class BassaltBuffer extends GpuBuffer {
         // This prevents stale data from previous frames from being uploaded.
         // When ring buffers rotate after 3 frames, unwritten portions would have
         // old data, causing flashing triangles.
-        System.out.println("[Bassalt DEBUG] Zero-initializing shadow buffer: nativePtr=" + nativePtr + ", offset=" + offset + ", capacity=" + shadowBuffer.capacity());
         for (int i = 0; i < shadowBuffer.capacity(); i++) {
             shadowBuffer.put(i, (byte) 0);
         }
 
         // Return a slice view of the shadow buffer (like wgpu-mc's buf.slice())
         ByteBuffer view = shadowBuffer.slice();
-        System.out.println("[Bassalt DEBUG] Returning shadow buffer slice: nativePtr=" + nativePtr + ", offset=" + offset + ", view.capacity=" + view.capacity());
         return view;
     }
 }

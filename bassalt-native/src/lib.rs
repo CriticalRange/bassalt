@@ -1348,7 +1348,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
     };
 
     // Parse WGSL shaders once for layout creation and caching
-    println!("[Bassalt] Parsing WGSL shaders for layout reflection...");
+    log::debug!("Parsing WGSL shaders for layout reflection...");
     let vertex_module = match front::wgsl::parse_str(&vertex_wgsl) {
         Ok(module) => module,
         Err(e) => {
@@ -1368,7 +1368,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
             return 0;
         }
     };
-    println!("[Bassalt] WGSL shaders parsed for layout");
+    log::debug!("WGSL shaders parsed for layout");
 
     // Create pipeline layout from shader reflection (needed for cache key)
     let (bind_group_layout_id, pipeline_layout_id, binding_layouts) = match create_layout_from_shaders(
@@ -1385,7 +1385,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
             return 0;
         }
     };
-    println!("[Bassalt] Pipeline layout created for cache");
+    log::debug!("Pipeline layout created for cache");
 
     // Map pipeline parameters
     let primitive_topology = match primitive_topology as u32 {
@@ -1433,7 +1433,6 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
         Err(e) => {
             let msg = format!("Failed to parse fragment WGSL for depth analysis: {:?}", e);
             log::error!("{}", msg);
-            println!("[Bassalt] ERROR: {}", msg);
             let _ = env.throw_new("java/lang/RuntimeException", &msg);
             return 0;
         }
@@ -1471,10 +1470,9 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
 
     let label = format!("NativePipeline_vfmt{}", vertex_format);
 
-    println!("[Bassalt] Creating pipeline with vertex_format={}, topology={:?}, label={}, depth_test={}, blend={}",
-             vertex_format, primitive_topology, label, depth_test_enabled, blend_enabled);
-
-    println!("[Bassalt] Checking pipeline cache for key hash {:x}...", pipeline_registry::PipelineCache::hash_key(&cache_key));
+    log::debug!("Creating pipeline with vertex_format={}, topology={:?}, label={}, depth_test={}, blend={}",
+        vertex_format, primitive_topology, label, depth_test_enabled, blend_enabled);
+    log::debug!("Checking pipeline cache for key hash {:x}...", pipeline_registry::PipelineCache::hash_key(&cache_key));
 
     let cached_pipeline = match device.pipeline_cache.get_or_create_render_pipeline(
         device_context,
@@ -1493,7 +1491,6 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
         Err(e) => {
             let msg = format!("Failed to create pipeline (via cache): {:?}", e);
             log::error!("{}", msg);
-            println!("[Bassalt] ERROR: {}", msg);
             let _ = env.throw_new("java/lang/RuntimeException", &msg);
             return 0;
         }
@@ -1501,11 +1498,11 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
 
     // Log cache statistics
     let stats = device.pipeline_cache.stats();
-    println!("[Bassalt] Pipeline cache stats - shader_hits: {}, shader_misses: {}, pipeline_hits: {}, pipeline_misses: {}, total_pipelines: {}",
+    log::debug!("Pipeline cache stats - shader_hits: {}, shader_misses: {}, pipeline_hits: {}, pipeline_misses: {}, total_pipelines: {}",
         stats.shader_hits, stats.shader_misses, stats.pipeline_hits, stats.pipeline_misses, stats.total_pipelines);
 
     let pipeline_id = cached_pipeline.pipeline_id;
-    println!("[Bassalt] Render pipeline created successfully via cache!");
+    log::debug!("Render pipeline created successfully via cache!");
 
     let num_bindings = binding_layouts.len();
     let handle = HANDLES.insert_render_pipeline(
@@ -1516,9 +1513,8 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
         depth_write_enabled != 0,  // Convert jboolean to bool
         depth_test_enabled != 0,   // Convert jboolean to bool
     );
-    log::info!("Created render pipeline via cache with handle {} (bgl: {:?}, bindings: {}, depth: {:?})",
+    log::debug!("Created render pipeline via cache with handle {} (bgl: {:?}, bindings: {}, depth: {:?})",
                handle, bind_group_layout_id, num_bindings, depth_format);
-    println!("[Bassalt] Pipeline handle: {}", handle);
     handle as jlong
 }
 
@@ -1552,7 +1548,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_begi
     // Look up texture view IDs from handles
     let color_view = if color_view_handle != 0 {
         let view = HANDLES.get_texture_view(color_view_handle as u64);
-        log::info!("beginRenderPass: color_view_handle={}, resolved={:?}", color_view_handle, view);
+        log::debug!("beginRenderPass: color_view_handle={}, resolved={:?}", color_view_handle, view);
         view
     } else {
         log::warn!("beginRenderPass: No color view handle provided!");
@@ -1569,7 +1565,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_begi
         HANDLES.get_texture_view(depth_view_handle as u64)
     } else {
         // Create depth texture matching color texture dimensions
-        log::info!("MC didn't provide depth texture, creating one for {}x{}", width, height);
+        log::debug!("MC didn't provide depth texture, creating one for {}x{}", width, height);
         match device.get_or_create_depth_view(width as u32, height as u32) {
             Ok(view) => Some(view),
             Err(e) => {
@@ -1593,7 +1589,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_begi
             HANDLES.get_texture_view_info(color_view_handle as u64)
                 .and_then(|view_info| {
                     if view_info.id == resolved_view {
-                        log::info!("beginRenderPass: Using TextureViewInfo fallback: texture {:?} (view={:?})",
+                        log::debug!("beginRenderPass: Using TextureViewInfo fallback: texture {:?} (view={:?})",
                             view_info.texture_id, view_info.id);
                         Some(view_info.texture_id)
                     } else {
@@ -1604,7 +1600,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_begi
                 })
         }
     }).map(|tex_id| {
-        log::info!("beginRenderPass: output texture will be {:?} (from view={:?})", tex_id, color_view.unwrap());
+        log::debug!("beginRenderPass: output texture will be {:?} (from view={:?})", tex_id, color_view.unwrap());
         tex_id
     });
 
@@ -1614,7 +1610,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_begi
     let (do_clear_color, clear_color_argb) = if let Some(tex_id) = output_texture {
         let mut initialized = device.initialized_textures.lock();
         if !do_clear_color && !initialized.contains(&tex_id) {
-            log::info!("Auto-clearing uninitialized texture {:?} (first use)", tex_id);
+            log::debug!("Auto-clearing uninitialized texture {:?} (first use)", tex_id);
             initialized.insert(tex_id);
             (true, 0xFF000000) // Clear to opaque black
         } else {
@@ -1624,7 +1620,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_begi
         (do_clear_color, clear_color_argb)
     };
 
-    log::info!("beginRenderPass: should_clear_color={}, should_clear_depth={}, output_texture={:?}",
+    log::debug!("beginRenderPass: should_clear_color={}, should_clear_depth={}, output_texture={:?}",
         do_clear_color, should_clear_depth != 0, output_texture);
 
     // Create render pass state
@@ -1702,7 +1698,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_setV
     buffer_handle: jlong,
     offset: jlong,
 ) {
-    log::info!("[BassaltNative] setVertexBuffer called: slot={}, buffer_handle={}, offset={}", slot, buffer_handle, offset);
+    log::debug!("[BassaltNative] setVertexBuffer called: slot={}, buffer_handle={}, offset={}", slot, buffer_handle, offset);
 
     if render_pass_ptr == 0 {
         log::error!("setVertexBuffer: render_pass_ptr is null!");
@@ -1718,7 +1714,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_setV
 
     if let Some(buffer_id) = HANDLES.get_buffer(buffer_handle as u64) {
         state.record_set_vertex_buffer(slot as u32, buffer_id, offset as u64, None);
-        log::info!("[BassaltNative] setVertexBuffer: slot={}, buffer={:?}, offset={}", slot, buffer_id, offset);
+        log::debug!("[BassaltNative] setVertexBuffer: slot={}, buffer={:?}, offset={}", slot, buffer_id, offset);
     } else {
         log::error!("setVertexBuffer: Invalid buffer handle: {}", buffer_handle);
     }
@@ -1735,7 +1731,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_setI
     index_type: jint,
     offset: jlong,
 ) {
-    log::info!("[BassaltNative] setIndexBuffer called: buffer_handle={}, index_type={}, offset={}", buffer_handle, index_type, offset);
+    log::debug!("[BassaltNative] setIndexBuffer called: buffer_handle={}, index_type={}, offset={}", buffer_handle, index_type, offset);
 
     if render_pass_ptr == 0 {
         log::error!("setIndexBuffer: render_pass_ptr is null!");
@@ -1778,7 +1774,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_setI
         }
 
         state.record_set_index_buffer(buffer_id, index_format, offset as u64, None);
-        log::info!("[BassaltNative] setIndexBuffer: buffer={:?}, index_format={:?}", buffer_id, index_format);
+        log::debug!("[BassaltNative] setIndexBuffer: buffer={:?}, index_format={:?}", buffer_id, index_format);
     } else {
         log::error!("setIndexBuffer: Invalid buffer handle: {}", buffer_handle);
     }
@@ -1797,7 +1793,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_draw
     base_vertex: jint,
     first_instance: jint,
 ) {
-    log::info!("NATIVE drawIndexed called: render_pass_ptr={}, indices={}", render_pass_ptr, index_count);
+    log::debug!("NATIVE drawIndexed called: render_pass_ptr={}, indices={}", render_pass_ptr, index_count);
 
     if render_pass_ptr == 0 {
         log::error!("NATIVE drawIndexed: render_pass_ptr is 0, returning early!");
@@ -1824,7 +1820,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_draw
         first_instance as u32,
     );
 
-    log::info!("NATIVE drawIndexed: Recorded draw (indices={}, instances={}, first={}, base={}, firstInst={})",
+    log::debug!("NATIVE drawIndexed: Recorded draw (indices={}, instances={}, first={}, base={}, firstInst={})",
         index_count, instance_count, first_index, base_vertex, first_instance);
 }
 
@@ -1952,7 +1948,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_endR
             // This fixes the race condition where present_frame could be called before rendering completes
             if let Some(texture_id) = output_texture {
                 device.set_main_framebuffer(texture_id);
-                log::info!("endRenderPass: Set main framebuffer to {:?} after successful render", texture_id);
+                log::debug!("endRenderPass: Set main framebuffer to {:?} after successful render", texture_id);
             } else {
                 log::debug!("endRenderPass: No output texture from this render pass");
             }
@@ -2186,7 +2182,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
                     // Find the correct binding slot by matching the uniform name
                     // Use wgpu-mc style direct name matching
                     let binding_slot = if let Some(ref pipeline_info) = pipeline_layout {
-                        log::info!("Looking for binding slot for uniform '{}', pipeline has {} bindings",
+                        log::debug!("Looking for binding slot for uniform '{}', pipeline has {} bindings",
                                    mc_name, pipeline_info.binding_layouts.len());
 
                         // First try: exact variable name match (case insensitive)
@@ -2196,7 +2192,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
                                     let matches = var_name.to_lowercase() == mc_name.to_lowercase() ||
                                         var_name.replace("_", "").to_lowercase() == mc_name.to_lowercase();
                                     if matches {
-                                        log::info!("  Exact match found: '{}' == '{}'", var_name, mc_name);
+                                        log::debug!("  Exact match found: '{}' == '{}'", var_name, mc_name);
                                     }
                                     matches
                                 } else {
@@ -2207,7 +2203,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
 
                         // Second try: fuzzy matching for known uniforms
                         if slot.is_none() {
-                            log::info!("  No exact match, trying fuzzy match for '{}'", mc_name);
+                            log::debug!("  No exact match, trying fuzzy match for '{}'", mc_name);
                             slot = match mc_name.as_str() {
                                 // For common uniforms, find matching uniform buffer by name patterns
                                 "Lighting" | "Projection" | "DynamicTransforms" | "DynamicUniforms" | "Fog" |
@@ -2238,7 +2234,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
                                                     (var_lower == "uniforms" && mc_simple == "transforms") ||
                                                     (var_lower == "transforms" && mc_simple == "uniforms");
                                                 if matches {
-                                                    log::info!("  Fuzzy match: '{}' ~= '{}' (base: '{}')",
+                                                    log::debug!("  Fuzzy match: '{}' ~= '{}' (base: '{}')",
                                                                var_name, mc_name, mc_simple);
                                                 }
                                                 matches
@@ -2279,7 +2275,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
                             buffer_info.size
                         };
 
-                        log::info!("Mapping uniform '{}' to binding slot {} (offset={}, size={})",
+                        log::debug!("Mapping uniform '{}' to binding slot {} (offset={}, size={})",
                                   mc_name, slot, offset, size);
                         builder = builder.add_uniform_buffer(slot, buffer_info.id, offset, size);
                     } else {
@@ -2339,10 +2335,10 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
             // and create empty bind groups for indices 1 and 2 if needed
             if _render_pass_ptr != 0 {
                 let state = unsafe { &mut *(_render_pass_ptr as *mut render_pass::RenderPassState) };
-                
+
                 // Set bind group 0
                 state.record_set_bind_group(0, Some(bind_group_id), Vec::new());
-                log::info!("Set bind group 0 with handle {} on render pass", handle);
+                log::debug!("Set bind group 0 with handle {} on render pass", handle);
             }
 
             handle as jlong
@@ -2719,7 +2715,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltCommandEnc
     ) {
         let _ = env.throw_new("java/lang/RuntimeException", &format!("Failed to write texture: {}", e));
     } else {
-        log::info!("Wrote {}x{} texture data ({} bytes) to texture {:?} at ({}, {}, layer={})",
+        log::debug!("Wrote {}x{} texture data ({} bytes) to texture {:?} at ({}, {}, layer={})",
                   width, height, data_vec.len(), texture_id, dest_x, dest_y, _depth_or_layer);
     }
 }
@@ -2927,7 +2923,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_sync_BassaltQuery_isTimest
 
     // Check if TIMESTAMP_QUERY feature is enabled
     if features.contains(wgt::Features::TIMESTAMP_QUERY) {
-        log::info!("Timestamp queries are supported");
+        log::debug!("Timestamp queries are supported");
         1
     } else {
         log::warn!("Timestamp queries are NOT supported on this device");
@@ -2963,7 +2959,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_sync_BassaltQuery_createTi
         num_queries.max(1) as u64,
     ) {
         Ok(queries) => {
-            log::info!("Created timestamp query set with {} queries", num_queries);
+            log::debug!("Created timestamp query set with {} queries", num_queries);
             // Box the query set and return as pointer
             Box::into_raw(Box::new(queries)) as jlong
         }
@@ -3203,7 +3199,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
         sample_count.max(1) as u32,
     ) {
         Ok(msaa_config) => {
-            log::info!("Created MSAA config: {}x{} with {} samples", width, height, msaa_config.sample_count);
+            log::debug!("Created MSAA config: {}x{} with {} samples", width, height, msaa_config.sample_count);
             // Box the config and return the pointer
             Box::into_raw(Box::new(msaa_config)) as jlong
         }
