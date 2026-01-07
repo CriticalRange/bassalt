@@ -1,6 +1,9 @@
-// Text background see-through vertex shader
+// Text background see-through vertex shader (GUI without fog/lightmap)
 //
 // All bindings in group 0 to match Bassalt's single bind group approach
+// Vertex format: POSITION_COLOR_LIGHTMAP (position, color, uv2)
+// Memory layout: Position[12] + Color[4] + UV2[8] = 24 bytes
+// Note: uv2 is present in vertex format but not used for GUI
 
 struct DynamicTransforms_t {
     ModelViewMat: mat4x4<f32>,
@@ -18,9 +21,11 @@ struct Projection_t {
 @group(0) @binding(4) var<uniform> DynamicTransforms: DynamicTransforms_t;
 @group(0) @binding(5) var<uniform> Projection: Projection_t;
 
+// Vertex format includes uv2 at location 2 even though we don't use it for GUI
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) color: vec4<f32>,
+    @location(2) uv2: vec2<f32>,  // Lightmap (not used for GUI)
 }
 
 struct VertexOutput {
