@@ -23,32 +23,32 @@ def getNativeLibraryExtension() {
 }
 
 // Task to convert GLSL shaders to WGSL using our Rust binary
-task convertShaders(type: Exec) {
-	dependsOn 'buildShaderConverter'
+// task convertShaders(type: Exec) {
+//	dependsOn 'buildShaderConverter'
 
-	workingDir file(".")
-	def extension = getNativeLibraryExtension()
-	def converterName = extension == ".dll" ? "shader_converter.exe" : "shader_converter"
+//	workingDir file(".")
+//	def extension = getNativeLibraryExtension()
+//	def converterName = extension == ".dll" ? "shader_converter.exe" : "shader_converter"
 
-	def converterPath = file("bassalt-native/target/release/${converterName}")
+//	def converterPath = file("bassalt-native/target/release/${converterName}")
 
 	// Build converter if it doesn't exist or is out of date
-	outputs.dir("src/main/resources/shaders/wgsl")
-	inputs.dir("src/main/resources/shaders/core")
-	inputs.dir("src/main/resources/shaders/include")
+//	outputs.dir("src/main/resources/shaders/wgsl")
+//	inputs.dir("src/main/resources/shaders/core")
+//	inputs.dir("src/main/resources/shaders/include")
 
-	def inputDir = file("src/main/resources/shaders").absolutePath
-	def outputDir = file("src/main/resources/shaders/wgsl").absolutePath
+//	def inputDir = file("src/main/resources/shaders").absolutePath
+//	def outputDir = file("src/main/resources/shaders/wgsl").absolutePath
 
-	commandLine converterPath, inputDir, outputDir
+//	commandLine converterPath, inputDir, outputDir
 
 	// Make sure converter is built first
-	doFirst {
-		if (!converterPath.exists()) {
-			throw new GradleException("Shader converter not found at ${converterPath}. Run 'cargo build --release --bin shader_converter' in bassalt-native directory first.")
-		}
-	}
-}
+//	doFirst {
+//		if (!converterPath.exists()) {
+//			throw new GradleException("Shader converter not found at ${converterPath}. Run 'cargo build --release --bin shader_converter' in bassalt-native directory first.")
+//		}
+//	}
+//}
 
 // Task to build the shader converter binary
 task buildShaderConverter(type: Exec) {
@@ -69,7 +69,7 @@ task buildShaderConverter(type: Exec) {
 }
 
 // Task to build the Rust native library
-task buildNative(type: Exec, dependsOn: convertShaders) {
+task buildNative(type: Exec) {
 	workingDir file("bassalt-native")
 	def cargoArgs = ["build", "--release"]
 	if (System.getProperty("os.name").toLowerCase().contains("mac")) {
@@ -139,7 +139,7 @@ tasks.named('build') {
 }
 
 // Make sure processResources runs after shader conversion
-processResources.dependsOn convertShaders
+// processResources.dependsOn convertShaders
 
 dependencies {
 	// To change the versions see the gradle.properties file
@@ -176,7 +176,7 @@ java {
 
 // Make sure sourcesJar also depends on shader conversion
 tasks.named('sourcesJar') {
-	dependsOn convertShaders
+//	dependsOn convertShaders
 }
 
 jar {

@@ -170,11 +170,21 @@ public class BassaltRenderPass implements RenderPass {
     @Override
     public void setVertexBuffer(int slot, @Nullable GpuBuffer vertexBuffer) {
         checkClosed();
-        if (vertexBuffer == null || !(vertexBuffer instanceof BassaltBuffer)) {
+
+        // DEBUG: Log all setVertexBuffer calls
+        if (vertexBuffer == null) {
+            System.out.println("[Bassalt DEBUG] setVertexBuffer: slot=" + slot + ", vertexBuffer=null");
+            return;
+        }
+
+        if (!(vertexBuffer instanceof BassaltBuffer)) {
+            System.out.println("[Bassalt DEBUG] setVertexBuffer: slot=" + slot + ", vertexBuffer class=" + vertexBuffer.getClass().getName() + " (NOT BassaltBuffer!)");
             return;
         }
 
         long bufferPtr = ((BassaltBuffer) vertexBuffer).getNativePtr();
+        System.out.println("[Bassalt DEBUG] setVertexBuffer: slot=" + slot + ", bufferPtr=" + bufferPtr);
+
         device.setVertexBuffer(
                 device.getNativePtr(),
                 nativePassPtr,
@@ -186,12 +196,22 @@ public class BassaltRenderPass implements RenderPass {
     @Override
     public void setIndexBuffer(@Nullable GpuBuffer indexBuffer, VertexFormat.@Nullable IndexType indexType) {
         checkClosed();
-        if (indexBuffer == null || !(indexBuffer instanceof BassaltBuffer)) {
+
+        // DEBUG: Log all setIndexBuffer calls
+        if (indexBuffer == null) {
+            System.out.println("[Bassalt DEBUG] setIndexBuffer: indexBuffer=null");
+            return;
+        }
+
+        if (!(indexBuffer instanceof BassaltBuffer)) {
+            System.out.println("[Bassalt DEBUG] setIndexBuffer: indexBuffer class=" + indexBuffer.getClass().getName() + " (NOT BassaltBuffer!)");
             return;
         }
 
         long bufferPtr = ((BassaltBuffer) indexBuffer).getNativePtr();
         int type = indexType == VertexFormat.IndexType.INT ? 1 : 0;
+
+        System.out.println("[Bassalt DEBUG] setIndexBuffer: bufferPtr=" + bufferPtr + ", type=" + type);
 
         device.setIndexBuffer(
                 device.getNativePtr(),

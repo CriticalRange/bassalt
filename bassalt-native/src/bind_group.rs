@@ -372,10 +372,12 @@ impl BindGroupBuilder {
                                     },
                                 ),
                             });
-                            log::debug!(
-                                "Bound {} buffer to slot {} (size={})",
+                            log::info!(
+                                "Bound {} buffer to slot {} (buffer={:?}, offset={}, size={})",
                                 if layout_entry.ty == BindingLayoutType::StorageBuffer { "storage" } else { "uniform" },
                                 layout_entry.binding,
+                                buffer_id,
+                                offset,
                                 effective_size
                             );
                         } else {

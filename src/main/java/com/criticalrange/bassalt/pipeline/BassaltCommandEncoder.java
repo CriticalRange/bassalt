@@ -186,15 +186,43 @@ public class BassaltCommandEncoder implements CommandEncoder {
         byte[] arr = new byte[data.remaining()];
         data.get(arr);
         long bufferPtr = ((com.criticalrange.bassalt.buffer.BassaltBuffer) destination.buffer()).getNativePtr();
+
+        // DEBUG: Log all buffer writes with vertex data
+        System.out.println("[Bassalt DEBUG] writeToBuffer: bufferPtr=" + bufferPtr + ", offset=" + destination.offset() + ", size=" + arr.length);
+
+        // For POSITION_COLOR format (16 bytes/vertex), log first few vertices
+        int vertexSize = 16; // POSITION_COLOR: 12 bytes position + 4 bytes color
+        int vertexCount = arr.length / vertexSize;
+        System.out.println("[Bassalt DEBUG]   Vertices: " + vertexCount + " (bytes=" + arr.length + ", vertexSize=" + vertexSize + ")");
+
+        if (vertexCount > 0 && arr.length >= vertexSize) {
+            java.nio.ByteBuffer bb = java.nio.ByteBuffer.wrap(arr).order(java.nio.ByteOrder.nativeOrder());
+            System.out.println("[Bassalt DEBUG]   First vertex: pos=(" + bb.getFloat(0) + ", " + bb.getFloat(4) + ", " + bb.getFloat(8) + "), color=" + bb.getInt(12));
+
+            // Log last vertex if we have more than one
+            if (vertexCount > 1) {
+                int lastOffset = (vertexCount - 1) * vertexSize;
+                System.out.println("[Bassalt DEBUG]   Last vertex #" + (vertexCount-1) + ": pos=(" +
+                    bb.getFloat(lastOffset) + ", " + bb.getFloat(lastOffset + 4) + ", " + bb.getFloat(lastOffset + 8) +
+                    "), color=" + bb.getInt(lastOffset + 12));
+            }
+        }
+
         BassaltDevice.writeBuffer(device.getNativePtr(), bufferPtr, arr, destination.offset());
     }
 
     @Override
     public GpuBuffer.@Nullable MappedView mapBuffer(GpuBuffer buffer, boolean read, boolean write) {
         BassaltBuffer bassaltBuffer = (BassaltBuffer) buffer;
+
+        // Get or create the cached shadow buffer for this GPU buffer slice (offset=0)
+        // This preserves data across map()/unmap() calls, just like OpenGL's persistent buffers
+        java.nio.ByteBuffer shadowBuffer = bassaltBuffer.getOrCreateShadowBuffer(0, bassaltBuffer.size());
+
         return new com.criticalrange.bassalt.buffer.BassaltMappedView(
             device,
             bassaltBuffer,
+            shadowBuffer,
             0,  // offset
             bassaltBuffer.size(),
             write
@@ -204,9 +232,18 @@ public class BassaltCommandEncoder implements CommandEncoder {
     @Override
     public GpuBuffer.@Nullable MappedView mapBuffer(GpuBufferSlice bufferSlice, boolean read, boolean write) {
         BassaltBuffer bassaltBuffer = (BassaltBuffer) bufferSlice.buffer();
+
+        // Get or create the cached shadow buffer for this specific slice
+        // Each slice gets its own shadow buffer that preserves data across map() calls
+        java.nio.ByteBuffer shadowBuffer = bassaltBuffer.getOrCreateShadowBuffer(
+            bufferSlice.offset(),
+            bufferSlice.length()
+        );
+
         return new com.criticalrange.bassalt.buffer.BassaltMappedView(
             device,
             bassaltBuffer,
+            shadowBuffer,
             bufferSlice.offset(),
             bufferSlice.length(),
             write

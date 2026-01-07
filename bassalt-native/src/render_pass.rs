@@ -120,6 +120,10 @@ pub struct RenderPassState {
     // Track max index count for validation (from index buffer size)
     max_index_count: Option<u64>,
 
+    // Track vertex buffer info for validation (to detect vertex overflows)
+    // Stores (buffer_id, size_in_bytes) for slot 0 (main vertex buffer)
+    vertex_buffer_size: Option<u64>,
+
     // Depth write mode tracking
     // Tracks whether any pipeline in this pass writes to depth
     // This is used to set the read_only flag on the depth attachment
@@ -214,6 +218,7 @@ impl RenderPassState {
             bind_groups_set: [false; 4],
             pipeline_set: false,
             max_index_count: None,
+            vertex_buffer_size: None,
             depth_mode: DepthMode::Unknown, // Will be determined by first pipeline
             pipeline_compatible: true, // Initially true, set false when incompatible pipeline is set
         };
@@ -305,6 +310,13 @@ impl RenderPassState {
         offset: u64,
         size: Option<NonZero<u64>>,
     ) {
+        // Track vertex buffer size for slot 0 (main vertex buffer) to detect overflows
+        if slot == 0 {
+            self.vertex_buffer_size = size.map(|sz| sz.get());
+            log::debug!("[Bassalt] Set vertex buffer slot 0: buffer={:?}, offset={}, size={:?}",
+                buffer_id, offset, size);
+        }
+
         self.commands.push(RenderCommand::SetVertexBuffer {
             slot,
             buffer_id,
@@ -362,6 +374,39 @@ impl RenderPassState {
         if !self.bind_groups_set[0] {
             log::warn!("DrawIndexed called without bind group 0 set!");
         }
+
+        // VALIDATION: Check for vertex buffer overflow
+        // For POSITION_COLOR format, vertex stride is 16 bytes
+        // This is a heuristic - actual stride depends on the vertex format
+        const VERTEX_STRIDE: u64 = 16; // POSITION_COLOR: 12 bytes pos + 4 bytes color
+
+        if let Some(vbuf_size) = self.vertex_buffer_size {
+            // Calculate max vertex index that could be accessed
+            // Worst case: base_vertex + index_count (if indices are 0,1,2,...)
+            let max_vertex_index = if base_vertex >= 0 {
+                base_vertex as u64 + index_count as u64 - 1
+            } else {
+                // Negative base_vertex means we're reading from before the buffer start
+                index_count as u64
+            };
+
+            // Calculate how many vertices fit in the buffer
+            let max_vertices = vbuf_size / VERTEX_STRIDE;
+
+            if max_vertex_index >= max_vertices {
+                log::warn!(
+                    "[Bassalt] VERTEX BUFFER OVERFLOW DETECTED: \
+                    drawIndexed(indices={}, baseVertex={}) will access vertex {} \
+                    but buffer only fits {} vertices ({} bytes / {} stride). \
+                    This will cause flashing triangles from unwritten vertices!",
+                    index_count, base_vertex, max_vertex_index, max_vertices, vbuf_size, VERTEX_STRIDE
+                );
+
+                // Don't skip the draw - let wgpu-core validate and error if needed
+                // But at least we warned about the root cause
+            }
+        }
+
         self.commands.push(RenderCommand::DrawIndexed {
             index_count,
             instance_count,

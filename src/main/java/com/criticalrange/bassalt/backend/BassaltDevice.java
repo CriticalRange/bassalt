@@ -290,6 +290,9 @@ public class BassaltDevice implements GpuDevice {
         // Check cache first
         BassaltCompiledRenderPipeline cached = pipelineCache.get(cacheKey);
         if (cached != null && !cached.isClosed()) {
+            System.out.println("[Bassalt] Cache HIT for pipeline: " + pipeline.getLocation());
+            System.out.println("[Bassalt]   Vertex: " + pipeline.getVertexShader());
+            System.out.println("[Bassalt]   Fragment: " + pipeline.getFragmentShader());
             return cached;
         }
 
@@ -364,11 +367,22 @@ public class BassaltDevice implements GpuDevice {
         String resourcePath = "shaders/wgsl/" + shaderPath + "." + stage + ".wgsl"; // e.g.,
                                                                                     // "shaders/wgsl/core/gui.vert.wgsl"
 
+        // Log shader loading for debugging
+        System.out.println("[Bassalt] Loading WGSL shader: " + shaderId + " -> " + resourcePath);
+
         try (var input = getClass().getResourceAsStream("/" + resourcePath)) {
             if (input == null) {
+                System.err.println("[Bassalt] WGSL shader NOT FOUND: " + resourcePath);
                 return null;
             }
-            return new String(input.readAllBytes());
+            String content = new String(input.readAllBytes());
+            System.out.println("[Bassalt] Loaded WGSL shader: " + resourcePath + " (" + content.length() + " bytes)");
+            // Log first 200 chars for debugging
+            if (content.length() > 0) {
+                String preview = content.substring(0, Math.min(200, content.length())).replace("\n", " ");
+                System.out.println("[Bassalt] Shader preview: " + preview + "...");
+            }
+            return content;
         } catch (java.io.IOException e) {
             System.err.println("[Bassalt] Error loading WGSL shader " + resourcePath + ": " + e);
             return null;

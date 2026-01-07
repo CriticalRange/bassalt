@@ -803,7 +803,7 @@ mod tests {
             blend_dst_color_factor: None,
             blend_src_alpha_factor: None,
             blend_dst_alpha_factor: None,
-            target_format: wgt::TextureFormat::Rgba8UnormSrgb,
+            target_format: wgt::TextureFormat::Bgra8UnormSrgb,  // Updated to match swapchain
             depth_format: PipelineDepthFormat::Depth32Float,
             depth_bias_constant: 0,
             depth_bias_slope_scale: 0,
@@ -821,7 +821,7 @@ mod tests {
             blend_dst_color_factor: None,
             blend_src_alpha_factor: None,
             blend_dst_alpha_factor: None,
-            target_format: wgt::TextureFormat::Rgba8UnormSrgb,
+            target_format: wgt::TextureFormat::Bgra8UnormSrgb,  // Updated to match swapchain
             depth_format: PipelineDepthFormat::Depth32Float,
             depth_bias_constant: 0,
             depth_bias_slope_scale: 0,

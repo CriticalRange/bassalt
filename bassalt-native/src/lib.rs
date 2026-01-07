@@ -471,7 +471,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
         Ok(buffer_id) => {
             // Store the buffer ID and size, return a handle
             let handle = HANDLES.insert_buffer(buffer_id, size as u64);
-            log::debug!("Created buffer with handle {} (size={})", handle, size);
+            log::info!("[BassaltNative] Created buffer: handle={}, wgpu_id={:?}, size={}", handle, buffer_id, size);
             handle as jlong
         }
         Err(e) => {
@@ -1463,7 +1463,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
         blend_dst_color_factor: if effective_blend_enabled { map_blend_factor_from_jni(blend_dst_color_factor) } else { None },
         blend_src_alpha_factor: if effective_blend_enabled { map_blend_factor_from_jni(blend_src_alpha_factor) } else { None },
         blend_dst_alpha_factor: if effective_blend_enabled { map_blend_factor_from_jni(blend_dst_alpha_factor) } else { None },
-        target_format: wgt::TextureFormat::Rgba8UnormSrgb,  // Use sRGB for color-correct rendering
+        target_format: device.swapchain_format(),  // Use actual swapchain format for compatibility
         depth_format,  // CRITICAL: Include depth format in cache key!
         depth_bias_constant: 0,  // TODO: Pass from Java when Minecraft uses depth bias
         depth_bias_slope_scale: 0,  // TODO: Pass from Java when Minecraft uses depth bias (stored as f32 bits)
@@ -1702,6 +1702,8 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_setV
     buffer_handle: jlong,
     offset: jlong,
 ) {
+    log::info!("[BassaltNative] setVertexBuffer called: slot={}, buffer_handle={}, offset={}", slot, buffer_handle, offset);
+
     if render_pass_ptr == 0 {
         log::error!("setVertexBuffer: render_pass_ptr is null!");
         return;
@@ -1716,7 +1718,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_setV
 
     if let Some(buffer_id) = HANDLES.get_buffer(buffer_handle as u64) {
         state.record_set_vertex_buffer(slot as u32, buffer_id, offset as u64, None);
-        println!("[Bassalt] setVertexBuffer: slot={}, buffer={:?}, offset={}", slot, buffer_id, offset);
+        log::info!("[BassaltNative] setVertexBuffer: slot={}, buffer={:?}, offset={}", slot, buffer_id, offset);
     } else {
         log::error!("setVertexBuffer: Invalid buffer handle: {}", buffer_handle);
     }
@@ -1733,6 +1735,8 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_setI
     index_type: jint,
     offset: jlong,
 ) {
+    log::info!("[BassaltNative] setIndexBuffer called: buffer_handle={}, index_type={}, offset={}", buffer_handle, index_type, offset);
+
     if render_pass_ptr == 0 {
         log::error!("setIndexBuffer: render_pass_ptr is null!");
         return;
@@ -1774,8 +1778,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_setI
         }
 
         state.record_set_index_buffer(buffer_id, index_format, offset as u64, None);
-        log::debug!("Recorded setIndexBuffer (buffer={:?}, type={:?}, offset={})",
-            buffer_id, index_format, offset);
+        log::info!("[BassaltNative] setIndexBuffer: buffer={:?}, index_format={:?}", buffer_id, index_format);
     } else {
         log::error!("setIndexBuffer: Invalid buffer handle: {}", buffer_handle);
     }

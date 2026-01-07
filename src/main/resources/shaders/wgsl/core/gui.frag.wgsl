@@ -21,8 +21,6 @@ struct Projection_t {
 
 @fragment
 fn main(@location(0) vertex_color: vec4<f32>) -> @location(0) vec4<f32> {
-    if (vertex_color.a == 0.0) {
-        discard;
-    }
+    // Apply ColorModulator to tint the vertex color
     return vertex_color * DynamicTransforms.ColorModulator;
 }

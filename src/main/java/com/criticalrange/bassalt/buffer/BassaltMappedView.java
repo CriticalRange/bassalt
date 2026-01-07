@@ -29,24 +29,25 @@ public class BassaltMappedView implements GpuBuffer.MappedView {
      *
      * @param device The Bassalt device
      * @param buffer The buffer being mapped
+     * @param shadowBuffer The cached shadow buffer from BassaltBuffer
      * @param offset Offset into the buffer
      * @param size Size of the mapped region
      * @param write Whether the buffer is mapped for writing (needs flush on close)
      */
-    public BassaltMappedView(BassaltDevice device, BassaltBuffer buffer, long offset, long size, boolean write) {
+    public BassaltMappedView(BassaltDevice device, BassaltBuffer buffer, ByteBuffer shadowBuffer, long offset, long size, boolean write) {
         this.device = device;
         this.buffer = buffer;
         this.offset = offset;
         this.write = write;
 
-        // Allocate a shadow buffer in system memory
-        // In a production implementation, we might want to cache this shadow buffer
-        // to avoid repeated allocations, but for now this is sufficient
-        this.shadowBuffer = ByteBuffer.allocateDirect((int) size);
+        // Use the cached shadow buffer from BassaltBuffer
+        // This preserves data across map()/unmap() calls, just like OpenGL's persistent buffers
+        this.shadowBuffer = shadowBuffer;
 
-        // DEBUG: Log shadow buffer allocation and check initial contents
-        System.out.println("[Bassalt DEBUG] MappedView allocated: bufferPtr=" + buffer.getNativePtr() +
-                         ", offset=" + offset + ", size=" + size + ", write=" + write);
+        // DEBUG: Log shadow buffer usage and check initial contents
+        System.out.println("[Bassalt DEBUG] MappedView using cached shadow buffer: bufferPtr=" + buffer.getNativePtr() +
+                         ", offset=" + offset + ", size=" + size + ", write=" + write +
+                         ", shadowBuffer.capacity=" + shadowBuffer.capacity());
 
         // Check if buffer is actually zero-initialized
         if (size >= 80) {
@@ -75,37 +76,126 @@ public class BassaltMappedView implements GpuBuffer.MappedView {
 
     @Override
     public void close() {
+        System.out.println("[Bassalt DEBUG] MappedView.close() ENTRY: bufferPtr=" + buffer.getNativePtr() +
+                         ", closed=" + closed + ", write=" + write + ", shadowBuffer=" + (shadowBuffer != null));
+
         if (closed) {
+            System.out.println("[Bassalt DEBUG] MappedView.close() EARLY RETURN (already closed): bufferPtr=" + buffer.getNativePtr());
             return;
         }
         closed = true;
 
         // If mapped for writing, copy the shadow buffer data to the GPU
         if (write && shadowBuffer != null) {
-            // DEBUG: Log buffer state before flip
-            System.out.println("[Bassalt DEBUG] MappedView.close(): before flip - position=" +
+            // DEBUG: Log buffer state before copy
+            System.out.println("[Bassalt DEBUG] MappedView.close(): position=" +
                              shadowBuffer.position() + ", limit=" + shadowBuffer.limit() +
                              ", capacity=" + shadowBuffer.capacity());
 
-            shadowBuffer.flip();
+            // CRITICAL FIX: Only upload what MC actually wrote!
+            // Find the last non-zero byte to determine the actual data size
+            int oldPosition = shadowBuffer.position();
+            int oldLimit = shadowBuffer.limit();
 
-            byte[] data = new byte[shadowBuffer.remaining()];
+            // Create a copy to scan for trailing zeros without modifying position
+            byte[] tempScan = new byte[Math.min(shadowBuffer.capacity(), 4096)]; // Scan first 4KB
+            shadowBuffer.position(0);
+            shadowBuffer.limit(tempScan.length);
+            shadowBuffer.get(tempScan);
+            shadowBuffer.position(oldPosition);
+            shadowBuffer.limit(oldLimit);
+
+            // Find the last non-zero byte in the scanned portion
+            int actualDataSize = tempScan.length;
+            while (actualDataSize > 0 && tempScan[actualDataSize - 1] == 0) {
+                actualDataSize--;
+            }
+
+            // If the entire scanned portion is zeros, check if there's more data beyond
+            if (actualDataSize == 0 && shadowBuffer.capacity() > tempScan.length) {
+                actualDataSize = shadowBuffer.capacity(); // Upload everything (shouldn't happen)
+            }
+
+            // CRITICAL: Round up to 4-byte alignment (WebGPU requirement)
+            // Vertex buffers also benefit from 16-byte alignment (vertex size), but 4 is minimum
+            int alignedSize = (actualDataSize + 3) & ~3;
+            if (alignedSize > shadowBuffer.capacity()) {
+                alignedSize = shadowBuffer.capacity();
+            }
+
+            System.out.println("[Bassalt DEBUG] MappedView.close(): capacity=" + shadowBuffer.capacity() + ", actualDataSize=" + actualDataSize + ", alignedSize=" + alignedSize + " (4-byte aligned)");
+
+            // Read only the actual data (with 4-byte alignment padding)
+            shadowBuffer.position(0);
+            shadowBuffer.limit(alignedSize);
+
+            byte[] data = new byte[alignedSize];
             shadowBuffer.get(data);
 
-            // DEBUG: Log what we're about to write
+            // Restore old position/limit (though we're closing anyway)
+            shadowBuffer.position(oldPosition);
+            shadowBuffer.limit(oldLimit);
+
+            // DEBUG: Log vertex data being uploaded
+            System.out.println("[Bassalt DEBUG] MappedView.close(): bufferPtr=" + buffer.getNativePtr() +
+                             ", GPU offset=" + offset + ", uploading " + data.length + " bytes");
+
+            // For POSITION_COLOR format (16 bytes/vertex), log vertex data
+            int vertexSize = 16; // POSITION_COLOR: 12 bytes position + 4 bytes color
+            int vertexCount = data.length / vertexSize;
+            System.out.println("[Bassalt DEBUG]   Vertices to upload: " + vertexCount + " (bytes=" + data.length + ", vertexSize=" + vertexSize + ")");
+
+            if (vertexCount > 0 && data.length >= vertexSize) {
+                java.nio.ByteBuffer bb = java.nio.ByteBuffer.wrap(data).order(java.nio.ByteOrder.nativeOrder());
+                System.out.println("[Bassalt DEBUG]   First vertex: pos=(" + bb.getFloat(0) + ", " + bb.getFloat(4) + ", " + bb.getFloat(8) + "), color=" + bb.getInt(12));
+
+                // Log last vertex if we have more than one
+                if (vertexCount > 1) {
+                    int lastOffset = (vertexCount - 1) * vertexSize;
+                    System.out.println("[Bassalt DEBUG]   Last vertex #" + (vertexCount-1) + ": pos=(" +
+                        bb.getFloat(lastOffset) + ", " + bb.getFloat(lastOffset + 4) + ", " + bb.getFloat(lastOffset + 8) +
+                        "), color=" + bb.getInt(lastOffset + 12));
+                }
+
+                // Check if any vertices are all zeros
+                int zeroVertices = 0;
+                for (int v = 0; v < vertexCount; v++) {
+                    int offset = v * vertexSize;
+                    float x = bb.getFloat(offset);
+                    float y = bb.getFloat(offset + 4);
+                    float z = bb.getFloat(offset + 8);
+                    int color = bb.getInt(offset + 12);
+                    if (x == 0 && y == 0 && z == 0 && color == 0) {
+                        zeroVertices++;
+                    }
+                }
+                System.out.println("[Bassalt DEBUG]   Zero vertices: " + zeroVertices + " / " + vertexCount);
+            }
+
+            // DEBUG: Log what we're about to write (only if >= 80 bytes to avoid spam)
             if (data.length >= 80) {
-                java.nio.ByteBuffer bb = java.nio.ByteBuffer.wrap(data).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+                java.nio.ByteBuffer bb = java.nio.ByteBuffer.wrap(data).order(java.nio.ByteOrder.nativeOrder());
                 float colorModR = bb.getFloat(64);
                 float colorModG = bb.getFloat(68);
                 float colorModB = bb.getFloat(72);
                 float colorModA = bb.getFloat(76);
                 System.out.println("[Bassalt DEBUG] MappedView.close(): bufferPtr=" + buffer.getNativePtr() +
-                                 ", data.length=" + data.length +
-                                 ", writing ColorModulator=[" + colorModR + ", " + colorModG + ", " + colorModB + ", " + colorModA + "]");
+                                 ", GPU offset=" + offset + ", data.length=" + data.length +
+                                 ", ColorModulator at shadow[64]=[" + colorModR + ", " + colorModG + ", " + colorModB + ", " + colorModA + "]");
 
-                // Also log first few floats to see pattern
-                System.out.println("[Bassalt DEBUG]   First 4 floats (ModelViewMat): [" +
-                                 bb.getFloat(0) + ", " + bb.getFloat(4) + ", " + bb.getFloat(8) + ", " + bb.getFloat(12) + "]");
+                // Also log what's at the beginning of the buffer to see structure
+                System.out.println("[Bassalt DEBUG]   First 4 floats at shadow[0]: [" +
+                    bb.getFloat(0) + ", " + bb.getFloat(4) + ", " + bb.getFloat(8) + ", " + bb.getFloat(12) + "]");
+
+                // Log full ModelViewMat (first 16 floats = 4x4 matrix)
+                System.out.println("[Bassalt DEBUG]   ModelViewMat (16 floats):");
+                for (int row = 0; row < 4; row++) {
+                    System.out.println("     Row " + row + ": [" +
+                        bb.getFloat(row*16 + 0) + ", " +
+                        bb.getFloat(row*16 + 4) + ", " +
+                        bb.getFloat(row*16 + 8) + ", " +
+                        bb.getFloat(row*16 + 12) + "]");
+                }
             }
 
             BassaltDevice.writeBuffer(

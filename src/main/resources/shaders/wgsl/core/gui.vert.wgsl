@@ -29,9 +29,15 @@ struct VertexOutput {
 }
 
 @vertex
-fn main(in: VertexInput) -> VertexOutput {
+fn main(@builtin(vertex_index) vertex_index: u32, in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    out.position = Projection.ProjMat * DynamicTransforms.ModelViewMat * vec4<f32>(in.position, 1.0);
+
+    // Transform vertex position by ModelView and Projection matrices
+    let world_pos = DynamicTransforms.ModelViewMat * vec4<f32>(in.position, 1.0);
+    out.position = Projection.ProjMat * world_pos;
+
+    // Pass through vertex color
     out.vertex_color = in.color;
+
     return out;
 }
