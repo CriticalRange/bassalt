@@ -38,7 +38,7 @@ impl BasaltContext {
         };
 
         log::debug!("Instance flags: {:?}", flags);
-        let global = Global::new("basalt", &instance_desc);
+        let global = Global::new("basalt", &instance_desc, None);  // No telemetry (wgpu 28.0+)
 
         Self {
             inner: Arc::new(global),

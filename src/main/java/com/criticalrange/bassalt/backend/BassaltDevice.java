@@ -16,6 +16,8 @@ import com.criticalrange.bassalt.texture.BassaltTexture;
 import com.criticalrange.bassalt.texture.BassaltTextureView;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.jspecify.annotations.Nullable;
 
 import java.nio.ByteBuffer;
@@ -31,6 +33,8 @@ import java.util.function.Supplier;
  */
 @Environment(EnvType.CLIENT)
 public class BassaltDevice implements GpuDevice {
+
+    private static final Logger LOGGER = LogManager.getLogger("Bassalt");
 
     // Native method declarations
     private static native String getImplementationInfo(long ptr);
@@ -59,18 +63,6 @@ public class BassaltDevice implements GpuDevice {
     private static native long createBufferData(long ptr, byte[] data, int usage);
 
     public static void writeBuffer(long ptr, long bufferPtr, byte[] data, long offset) {
-        // DEBUG: Log buffer writes, especially for DynamicTransforms
-        if (data.length >= 80) {  // At least 20 floats (to reach ColorModulator at offset 64)
-            // Try to read as floats
-            java.nio.ByteBuffer bb = java.nio.ByteBuffer.wrap(data).order(java.nio.ByteOrder.LITTLE_ENDIAN);
-            // ColorModulator is at offset 64 bytes = float position 16
-            float colorModR = bb.getFloat(64);
-            float colorModG = bb.getFloat(68);
-            float colorModB = bb.getFloat(72);
-            float colorModA = bb.getFloat(76);
-            System.out.println("[Bassalt DEBUG] writeBuffer: bufferPtr=" + bufferPtr + ", offset=" + offset + ", size=" + data.length +
-                             ", ColorModulator=[" + colorModR + ", " + colorModG + ", " + colorModB + ", " + colorModA + "]");
-        }
         writeBuffer0(ptr, bufferPtr, data, offset);
     }
 
@@ -290,31 +282,25 @@ public class BassaltDevice implements GpuDevice {
         // Check cache first
         BassaltCompiledRenderPipeline cached = pipelineCache.get(cacheKey);
         if (cached != null && !cached.isClosed()) {
-            System.out.println("[Bassalt] Cache HIT for pipeline: " + pipeline.getLocation());
-            System.out.println("[Bassalt]   Vertex: " + pipeline.getVertexShader());
-            System.out.println("[Bassalt]   Fragment: " + pipeline.getFragmentShader());
+            LOGGER.debug("Cache HIT for pipeline: {}", pipeline.getLocation());
             return cached;
         }
 
-        System.out.println("[Bassalt] Compiling pipeline: " + pipeline.getLocation());
-        System.out.println("[Bassalt]   Vertex: " + pipeline.getVertexShader());
-        System.out.println("[Bassalt]   Fragment: " + pipeline.getFragmentShader());
+        LOGGER.debug("Compiling pipeline: {}", pipeline.getLocation());
 
         // Try to load pre-converted WGSL shaders
         String vertexWgsl = loadPreconvertedWgsl(pipeline.getVertexShader(), "vert");
         String fragmentWgsl = loadPreconvertedWgsl(pipeline.getFragmentShader(), "frag");
 
         if (vertexWgsl == null || fragmentWgsl == null) {
-            System.err.println("[Bassalt] Failed to load pre-converted WGSL shaders");
-            System.err.println("[Bassalt]   Vertex WGSL: " + (vertexWgsl != null ? "loaded" : "NOT FOUND"));
-            System.err.println("[Bassalt]   Fragment WGSL: " + (fragmentWgsl != null ? "loaded" : "NOT FOUND"));
+            LOGGER.warn("Failed to load pre-converted WGSL shaders for {}", pipeline.getLocation());
+            LOGGER.debug("  Vertex WGSL: {}", vertexWgsl != null ? "loaded" : "NOT FOUND");
+            LOGGER.debug("  Fragment WGSL: {}", fragmentWgsl != null ? "loaded" : "NOT FOUND");
             // Return invalid pipeline
             BassaltCompiledRenderPipeline compiled = new BassaltCompiledRenderPipeline(this, 0);
             pipelineCache.put(cacheKey, compiled);
             return compiled;
         }
-
-        System.out.println("[Bassalt]   Loaded pre-converted WGSL shaders");
 
         // Get pipeline properties
         int vertexFormat = getVertexFormatIndex(pipeline.getVertexFormat());
@@ -349,9 +335,9 @@ public class BassaltDevice implements GpuDevice {
         pipelineCache.put(cacheKey, compiled);
 
         if (nativePipelinePtr != 0) {
-            System.out.println("[Bassalt]   ✓ Pipeline compiled successfully");
+            LOGGER.debug("Pipeline compiled successfully: {}", pipeline.getLocation());
         } else {
-            System.err.println("[Bassalt]   ✗ Pipeline compilation failed (native ptr = 0)");
+            LOGGER.warn("Pipeline compilation failed: {}", pipeline.getLocation());
         }
 
         return compiled;
@@ -367,24 +353,16 @@ public class BassaltDevice implements GpuDevice {
         String resourcePath = "shaders/wgsl/" + shaderPath + "." + stage + ".wgsl"; // e.g.,
                                                                                     // "shaders/wgsl/core/gui.vert.wgsl"
 
-        // Log shader loading for debugging
-        System.out.println("[Bassalt] Loading WGSL shader: " + shaderId + " -> " + resourcePath);
-
         try (var input = getClass().getResourceAsStream("/" + resourcePath)) {
             if (input == null) {
-                System.err.println("[Bassalt] WGSL shader NOT FOUND: " + resourcePath);
+                LOGGER.debug("WGSL shader NOT FOUND: {}", resourcePath);
                 return null;
             }
             String content = new String(input.readAllBytes());
-            System.out.println("[Bassalt] Loaded WGSL shader: " + resourcePath + " (" + content.length() + " bytes)");
-            // Log first 200 chars for debugging
-            if (content.length() > 0) {
-                String preview = content.substring(0, Math.min(200, content.length())).replace("\n", " ");
-                System.out.println("[Bassalt] Shader preview: " + preview + "...");
-            }
+            LOGGER.debug("Loaded WGSL shader: {} ({} bytes)", resourcePath, content.length());
             return content;
         } catch (java.io.IOException e) {
-            System.err.println("[Bassalt] Error loading WGSL shader " + resourcePath + ": " + e);
+            LOGGER.warn("Error loading WGSL shader {}: {}", resourcePath, e.getMessage());
             return null;
         }
     }
@@ -402,16 +380,11 @@ public class BassaltDevice implements GpuDevice {
         // normal)
         String name = format.toString().toLowerCase();
 
-        // DEBUG: Log all vertex format names
-        if (name.contains("position") && (name.contains("color") || name.contains("uv"))) {
-            System.out.println("[Bassalt DEBUG] getVertexFormatIndex: name=" + name);
-        }
-
         // Parse the format string: "vertexformat[position, color, ...]"
         if (name.startsWith("vertexformat[") && name.endsWith("]")) {
             String elements = name.substring(13, name.length() - 1); // Extract "position, color, ..."
             if (elements.isEmpty()) {
-                System.out.println("[Bassalt] Empty vertex format - using vertex_index mode (255)");
+                LOGGER.debug("Empty vertex format - using vertex_index mode (255)");
                 return 255; // EMPTY - shader uses @builtin(vertex_index)
             }
 
@@ -459,7 +432,7 @@ public class BassaltDevice implements GpuDevice {
             }
         }
 
-        System.err.println("[Bassalt] Unknown vertex format: " + name + ", defaulting to position_tex_color");
+        LOGGER.debug("Unknown vertex format: {}, defaulting to position_tex_color", name);
         return 3;
     }
 

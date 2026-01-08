@@ -13,6 +13,8 @@ import com.mojang.blaze3d.textures.GpuTextureView;
 import com.mojang.blaze3d.vertex.VertexFormat;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.jspecify.annotations.Nullable;
 
 import java.util.Collection;
@@ -32,6 +34,8 @@ import java.util.function.Supplier;
  */
 @Environment(EnvType.CLIENT)
 public class BassaltRenderPass implements RenderPass {
+
+    private static final Logger LOGGER = LogManager.getLogger("Bassalt");
 
     private final BassaltDevice device;
     private final long nativePassPtr;
@@ -81,21 +85,10 @@ public class BassaltRenderPass implements RenderPass {
                 null);
         if (compiled != null && compiled.isValid()) {
             this.currentPipelineHandle = compiled.getNativePtr();
-
-            // DEBUG: Log pipeline location and handle
-            var location = pipeline.getLocation();
-            String locationStr = location != null ? location.toString() : "null";
-            if (locationStr.contains("gui") || locationStr.contains("text")) {
-                System.out.println("[Bassalt DEBUG] setPipeline: location=" + locationStr +
-                                 ", handle=" + compiled.getNativePtr() +
-                                 ", isValid=" + compiled.isValid());
-            }
-
             BassaltDevice.setPipeline(device.getNativePtr(), nativePassPtr, compiled.getNativePtr());
         } else {
             this.currentPipelineHandle = 0;
-            // Log warning if pipeline compilation failed
-            System.err.println("[Bassalt] Warning: Pipeline compilation failed for " + pipeline.getLocation());
+            LOGGER.warn("Pipeline compilation failed for {}", pipeline.getLocation());
         }
     }
 
@@ -107,18 +100,14 @@ public class BassaltRenderPass implements RenderPass {
 
         if (textureView == null) {
             textureBindings.remove(name);
-            // DEBUG: Log texture unbinding
-            System.out.println("[Bassalt DEBUG] bindTexture: name=" + name + ", textureView=null (UNBIND)");
         } else if (textureView instanceof BassaltTextureView) {
             long texturePtr = ((BassaltTextureView) textureView).getNativePtr();
             long samplerPtr = sampler != null && sampler instanceof BassaltSampler
                     ? ((BassaltSampler) sampler).getNativePtr()
                     : 0;
             textureBindings.put(name, new TextureBinding(texturePtr, samplerPtr));
-            // DEBUG: Log ALL texture bindings
-            System.out.println("[Bassalt DEBUG] bindTexture: name=" + name + ", texturePtr=" + texturePtr + ", samplerPtr=" + samplerPtr);
         } else {
-            System.err.println("[Bassalt] WARNING: textureView is NOT BassaltTextureView! Type: " + textureView.getClass().getName());
+            LOGGER.warn("textureView is NOT BassaltTextureView! Type: {}", textureView.getClass().getName());
         }
     }
 
@@ -131,8 +120,6 @@ public class BassaltRenderPass implements RenderPass {
         if (value instanceof BassaltBuffer) {
             long bufferPtr = ((BassaltBuffer) value).getNativePtr();
             uniformBindings.put(name, new UniformBinding(bufferPtr, 0, value.size()));
-            // DEBUG: Log ALL uniform buffer bindings
-            System.out.println("[Bassalt DEBUG] setUniform(GpuBuffer): name=" + name + ", bufferPtr=" + bufferPtr + ", size=" + value.size());
         }
     }
 
@@ -145,8 +132,6 @@ public class BassaltRenderPass implements RenderPass {
         if (value.buffer() instanceof BassaltBuffer) {
             long bufferPtr = ((BassaltBuffer) value.buffer()).getNativePtr();
             uniformBindings.put(name, new UniformBinding(bufferPtr, value.offset(), value.length()));
-            // DEBUG: Log ALL uniform slice bindings
-            System.out.println("[Bassalt DEBUG] setUniform(GpuBufferSlice): name=" + name + ", bufferPtr=" + bufferPtr + ", offset=" + value.offset() + ", length=" + value.length());
         }
     }
 
@@ -171,20 +156,16 @@ public class BassaltRenderPass implements RenderPass {
     public void setVertexBuffer(int slot, @Nullable GpuBuffer vertexBuffer) {
         checkClosed();
 
-        // DEBUG: Log all setVertexBuffer calls
         if (vertexBuffer == null) {
-            System.out.println("[Bassalt DEBUG] setVertexBuffer: slot=" + slot + ", vertexBuffer=null");
             return;
         }
 
         if (!(vertexBuffer instanceof BassaltBuffer)) {
-            System.out.println("[Bassalt DEBUG] setVertexBuffer: slot=" + slot + ", vertexBuffer class=" + vertexBuffer.getClass().getName() + " (NOT BassaltBuffer!)");
+            LOGGER.debug("setVertexBuffer: slot={}, vertexBuffer class={} (NOT BassaltBuffer!)", slot, vertexBuffer.getClass().getName());
             return;
         }
 
         long bufferPtr = ((BassaltBuffer) vertexBuffer).getNativePtr();
-        System.out.println("[Bassalt DEBUG] setVertexBuffer: slot=" + slot + ", bufferPtr=" + bufferPtr);
-
         device.setVertexBuffer(
                 device.getNativePtr(),
                 nativePassPtr,
@@ -197,21 +178,17 @@ public class BassaltRenderPass implements RenderPass {
     public void setIndexBuffer(@Nullable GpuBuffer indexBuffer, VertexFormat.@Nullable IndexType indexType) {
         checkClosed();
 
-        // DEBUG: Log all setIndexBuffer calls
         if (indexBuffer == null) {
-            System.out.println("[Bassalt DEBUG] setIndexBuffer: indexBuffer=null");
             return;
         }
 
         if (!(indexBuffer instanceof BassaltBuffer)) {
-            System.out.println("[Bassalt DEBUG] setIndexBuffer: indexBuffer class=" + indexBuffer.getClass().getName() + " (NOT BassaltBuffer!)");
+            LOGGER.debug("setIndexBuffer: indexBuffer class={} (NOT BassaltBuffer!)", indexBuffer.getClass().getName());
             return;
         }
 
         long bufferPtr = ((BassaltBuffer) indexBuffer).getNativePtr();
         int type = indexType == VertexFormat.IndexType.INT ? 1 : 0;
-
-        System.out.println("[Bassalt DEBUG] setIndexBuffer: bufferPtr=" + bufferPtr + ", type=" + type);
 
         device.setIndexBuffer(
                 device.getNativePtr(),
@@ -334,17 +311,6 @@ public class BassaltRenderPass implements RenderPass {
             i++;
         }
 
-        // DEBUG: Log texture bindings being applied (AFTER population)
-        if (textureNames.length > 0) {
-            StringBuilder sb = new StringBuilder("[Bassalt DEBUG] applyBindings: textures=[");
-            for (int j = 0; j < textureNames.length; j++) {
-                if (j > 0) sb.append(", ");
-                sb.append(textureNames[j]).append("=").append(textures[j]);
-            }
-            sb.append("]");
-            System.out.println(sb.toString());
-        }
-
         String[] uniformNames = uniformBindings.keySet().toArray(new String[0]);
         long[] uniforms = new long[uniformBindings.size()];
         long[] uniformOffsets = new long[uniformBindings.size()];
@@ -371,9 +337,6 @@ public class BassaltRenderPass implements RenderPass {
                 uniforms,
                 uniformOffsets,
                 uniformSizes);
-
-        // DEBUG: Log bind group creation result
-        System.out.println("[Bassalt DEBUG] applyBindings: bindGroupPtr=" + bindGroupPtr + ", hasValidBindGroup=" + (bindGroupPtr != 0));
 
         if (bindGroupPtr != 0) {
             // Bind group was created and set successfully

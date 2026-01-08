@@ -4,6 +4,8 @@ import com.criticalrange.bassalt.backend.BassaltBackend;
 import com.mojang.blaze3d.opengl.GlBackend;
 import com.mojang.blaze3d.platform.Window;
 import com.mojang.blaze3d.systems.GpuBackend;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.ModifyVariable;
@@ -16,6 +18,8 @@ import org.spongepowered.asm.mixin.injection.ModifyVariable;
  */
 @Mixin(Window.class)
 public class BackendSwapMixin {
+
+    private static final Logger LOGGER = LogManager.getLogger("Bassalt");
 
     /**
      * Modify the backends array parameter in Window constructor
@@ -30,10 +34,10 @@ public class BackendSwapMixin {
         require = 1
     )
     private static GpuBackend[] bassalt$modifyBackendsArray(GpuBackend[] original) {
-        System.out.println("[Bassalt] Modifying backends array in Window constructor");
-        System.out.println("[Bassalt] bassalt.enabled property: " + System.getProperty("bassalt.enabled"));
+        LOGGER.debug("Modifying backends array in Window constructor");
+        LOGGER.debug("bassalt.enabled property: {}", System.getProperty("bassalt.enabled"));
         if (Boolean.getBoolean("bassalt.enabled")) {
-            System.out.println("[Bassalt] Injecting Bassalt backend into array");
+            LOGGER.debug("Injecting Bassalt backend into array");
             return new GpuBackend[]{new BassaltBackend(), new GlBackend()};
         }
         return original;

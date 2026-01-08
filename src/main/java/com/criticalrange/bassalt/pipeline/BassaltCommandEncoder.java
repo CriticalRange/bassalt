@@ -14,6 +14,8 @@ import com.mojang.blaze3d.textures.GpuTextureView;
 import com.mojang.blaze3d.vertex.VertexFormat;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.jspecify.annotations.Nullable;
 
 import java.nio.ByteBuffer;
@@ -32,6 +34,8 @@ import com.criticalrange.bassalt.sync.BassaltQuery;
  */
 @Environment(EnvType.CLIENT)
 public class BassaltCommandEncoder implements CommandEncoder {
+
+    private static final Logger LOGGER = LogManager.getLogger("Bassalt");
 
     private final BassaltDevice device;
     private long currentRenderPass = 0;

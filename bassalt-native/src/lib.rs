@@ -1265,13 +1265,8 @@ fn create_layout_from_shaders(
     let pl_desc = binding_model::PipelineLayoutDescriptor {
         label: Some(Cow::Borrowed("Pipeline Layout")),
         bind_group_layouts: Cow::Owned(vec![bgl_id]),
-        // Push constants: 128 bytes for model matrix + other per-draw data
-        push_constant_ranges: Cow::Owned(vec![
-            wgt::PushConstantRange {
-                stages: wgt::ShaderStages::VERTEX | wgt::ShaderStages::FRAGMENT,
-                range: 0..128,
-            },
-        ]),
+        // Immediates: 128 bytes for model matrix + other per-draw data
+        immediate_size: 128,
     };
 
     let (pl_id, pl_error) = global.device_create_pipeline_layout(device_id, &pl_desc, None);
@@ -1306,8 +1301,6 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
     blend_src_alpha_factor: jint,
     blend_dst_alpha_factor: jint,
 ) -> jlong {
-    use naga::front;
-
     // Validate device pointer
     if device_ptr == 0 {
         let _ = env.throw_new("java/lang/IllegalArgumentException", "Null device pointer");
@@ -1348,27 +1341,27 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
     };
 
     // Parse WGSL shaders once for layout creation and caching
-    println!("[Bassalt] Parsing WGSL shaders for layout reflection...");
-    let vertex_module = match front::wgsl::parse_str(&vertex_wgsl) {
+    log::debug!("Parsing WGSL shaders for layout reflection...");
+    let vertex_module = match shader::parse_wgsl_named(&vertex_wgsl, "vertex_shader") {
         Ok(module) => module,
         Err(e) => {
-            let msg = format!("Failed to parse vertex WGSL: {:?}", e);
+            let msg = format!("Failed to parse vertex WGSL: {}", e);
             log::error!("{}", msg);
             let _ = env.throw_new("java/lang/RuntimeException", &msg);
             return 0;
         }
     };
 
-    let fragment_module = match front::wgsl::parse_str(&fragment_wgsl) {
+    let fragment_module = match shader::parse_wgsl_named(&fragment_wgsl, "fragment_shader") {
         Ok(module) => module,
         Err(e) => {
-            let msg = format!("Failed to parse fragment WGSL: {:?}", e);
+            let msg = format!("Failed to parse fragment WGSL: {}", e);
             log::error!("{}", msg);
             let _ = env.throw_new("java/lang/RuntimeException", &msg);
             return 0;
         }
     };
-    println!("[Bassalt] WGSL shaders parsed for layout");
+    log::debug!("WGSL shaders parsed for layout");
 
     // Create pipeline layout from shader reflection (needed for cache key)
     let (bind_group_layout_id, pipeline_layout_id, binding_layouts) = match create_layout_from_shaders(
@@ -1385,7 +1378,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
             return 0;
         }
     };
-    println!("[Bassalt] Pipeline layout created for cache");
+    log::debug!("Pipeline layout created for cache");
 
     // Map pipeline parameters
     let primitive_topology = match primitive_topology as u32 {
@@ -1428,17 +1421,8 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
 
     // Depth format - check if fragment shader writes depth, otherwise disable depth testing
     // GUI shaders and other 2D shaders don't write depth, so they shouldn't have depth state
-    let fragment_naga_module = match naga::front::wgsl::parse_str(&fragment_wgsl) {
-        Ok(module) => module,
-        Err(e) => {
-            let msg = format!("Failed to parse fragment WGSL for depth analysis: {:?}", e);
-            log::error!("{}", msg);
-            println!("[Bassalt] ERROR: {}", msg);
-            let _ = env.throw_new("java/lang/RuntimeException", &msg);
-            return 0;
-        }
-    };
-    let shader_has_depth_output = shader_writes_depth(&fragment_naga_module);
+    // Note: fragment_module was already parsed above, reuse it instead of re-parsing
+    let shader_has_depth_output = shader_writes_depth(&fragment_module);
     let depth_format = if shader_has_depth_output {
         resource_handles::PipelineDepthFormat::Depth32Float
     } else {
@@ -1471,10 +1455,9 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
 
     let label = format!("NativePipeline_vfmt{}", vertex_format);
 
-    println!("[Bassalt] Creating pipeline with vertex_format={}, topology={:?}, label={}, depth_test={}, blend={}",
-             vertex_format, primitive_topology, label, depth_test_enabled, blend_enabled);
-
-    println!("[Bassalt] Checking pipeline cache for key hash {:x}...", pipeline_registry::PipelineCache::hash_key(&cache_key));
+    log::debug!("Creating pipeline with vertex_format={}, topology={:?}, label={}, depth_test={}, blend={}",
+        vertex_format, primitive_topology, label, depth_test_enabled, blend_enabled);
+    log::debug!("Checking pipeline cache for key hash {:x}...", pipeline_registry::PipelineCache::hash_key(&cache_key));
 
     let cached_pipeline = match device.pipeline_cache.get_or_create_render_pipeline(
         device_context,
@@ -1493,7 +1476,6 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
         Err(e) => {
             let msg = format!("Failed to create pipeline (via cache): {:?}", e);
             log::error!("{}", msg);
-            println!("[Bassalt] ERROR: {}", msg);
             let _ = env.throw_new("java/lang/RuntimeException", &msg);
             return 0;
         }
@@ -1501,11 +1483,11 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
 
     // Log cache statistics
     let stats = device.pipeline_cache.stats();
-    println!("[Bassalt] Pipeline cache stats - shader_hits: {}, shader_misses: {}, pipeline_hits: {}, pipeline_misses: {}, total_pipelines: {}",
+    log::debug!("Pipeline cache stats - shader_hits: {}, shader_misses: {}, pipeline_hits: {}, pipeline_misses: {}, total_pipelines: {}",
         stats.shader_hits, stats.shader_misses, stats.pipeline_hits, stats.pipeline_misses, stats.total_pipelines);
 
     let pipeline_id = cached_pipeline.pipeline_id;
-    println!("[Bassalt] Render pipeline created successfully via cache!");
+    log::debug!("Render pipeline created successfully via cache!");
 
     let num_bindings = binding_layouts.len();
     let handle = HANDLES.insert_render_pipeline(
@@ -1516,9 +1498,8 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
         depth_write_enabled != 0,  // Convert jboolean to bool
         depth_test_enabled != 0,   // Convert jboolean to bool
     );
-    log::info!("Created render pipeline via cache with handle {} (bgl: {:?}, bindings: {}, depth: {:?})",
+    log::debug!("Created render pipeline via cache with handle {} (bgl: {:?}, bindings: {}, depth: {:?})",
                handle, bind_group_layout_id, num_bindings, depth_format);
-    println!("[Bassalt] Pipeline handle: {}", handle);
     handle as jlong
 }
 
@@ -1552,7 +1533,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_begi
     // Look up texture view IDs from handles
     let color_view = if color_view_handle != 0 {
         let view = HANDLES.get_texture_view(color_view_handle as u64);
-        log::info!("beginRenderPass: color_view_handle={}, resolved={:?}", color_view_handle, view);
+        log::debug!("beginRenderPass: color_view_handle={}, resolved={:?}", color_view_handle, view);
         view
     } else {
         log::warn!("beginRenderPass: No color view handle provided!");
@@ -1569,7 +1550,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_begi
         HANDLES.get_texture_view(depth_view_handle as u64)
     } else {
         // Create depth texture matching color texture dimensions
-        log::info!("MC didn't provide depth texture, creating one for {}x{}", width, height);
+        log::debug!("MC didn't provide depth texture, creating one for {}x{}", width, height);
         match device.get_or_create_depth_view(width as u32, height as u32) {
             Ok(view) => Some(view),
             Err(e) => {
@@ -1593,7 +1574,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_begi
             HANDLES.get_texture_view_info(color_view_handle as u64)
                 .and_then(|view_info| {
                     if view_info.id == resolved_view {
-                        log::info!("beginRenderPass: Using TextureViewInfo fallback: texture {:?} (view={:?})",
+                        log::debug!("beginRenderPass: Using TextureViewInfo fallback: texture {:?} (view={:?})",
                             view_info.texture_id, view_info.id);
                         Some(view_info.texture_id)
                     } else {
@@ -1604,7 +1585,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_begi
                 })
         }
     }).map(|tex_id| {
-        log::info!("beginRenderPass: output texture will be {:?} (from view={:?})", tex_id, color_view.unwrap());
+        log::debug!("beginRenderPass: output texture will be {:?} (from view={:?})", tex_id, color_view.unwrap());
         tex_id
     });
 
@@ -1614,7 +1595,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_begi
     let (do_clear_color, clear_color_argb) = if let Some(tex_id) = output_texture {
         let mut initialized = device.initialized_textures.lock();
         if !do_clear_color && !initialized.contains(&tex_id) {
-            log::info!("Auto-clearing uninitialized texture {:?} (first use)", tex_id);
+            log::debug!("Auto-clearing uninitialized texture {:?} (first use)", tex_id);
             initialized.insert(tex_id);
             (true, 0xFF000000) // Clear to opaque black
         } else {
@@ -1624,7 +1605,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_begi
         (do_clear_color, clear_color_argb)
     };
 
-    log::info!("beginRenderPass: should_clear_color={}, should_clear_depth={}, output_texture={:?}",
+    log::debug!("beginRenderPass: should_clear_color={}, should_clear_depth={}, output_texture={:?}",
         do_clear_color, should_clear_depth != 0, output_texture);
 
     // Create render pass state
@@ -1702,7 +1683,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_setV
     buffer_handle: jlong,
     offset: jlong,
 ) {
-    log::info!("[BassaltNative] setVertexBuffer called: slot={}, buffer_handle={}, offset={}", slot, buffer_handle, offset);
+    log::debug!("[BassaltNative] setVertexBuffer called: slot={}, buffer_handle={}, offset={}", slot, buffer_handle, offset);
 
     if render_pass_ptr == 0 {
         log::error!("setVertexBuffer: render_pass_ptr is null!");
@@ -1718,7 +1699,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_setV
 
     if let Some(buffer_id) = HANDLES.get_buffer(buffer_handle as u64) {
         state.record_set_vertex_buffer(slot as u32, buffer_id, offset as u64, None);
-        log::info!("[BassaltNative] setVertexBuffer: slot={}, buffer={:?}, offset={}", slot, buffer_id, offset);
+        log::debug!("[BassaltNative] setVertexBuffer: slot={}, buffer={:?}, offset={}", slot, buffer_id, offset);
     } else {
         log::error!("setVertexBuffer: Invalid buffer handle: {}", buffer_handle);
     }
@@ -1735,7 +1716,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_setI
     index_type: jint,
     offset: jlong,
 ) {
-    log::info!("[BassaltNative] setIndexBuffer called: buffer_handle={}, index_type={}, offset={}", buffer_handle, index_type, offset);
+    log::debug!("[BassaltNative] setIndexBuffer called: buffer_handle={}, index_type={}, offset={}", buffer_handle, index_type, offset);
 
     if render_pass_ptr == 0 {
         log::error!("setIndexBuffer: render_pass_ptr is null!");
@@ -1778,7 +1759,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_setI
         }
 
         state.record_set_index_buffer(buffer_id, index_format, offset as u64, None);
-        log::info!("[BassaltNative] setIndexBuffer: buffer={:?}, index_format={:?}", buffer_id, index_format);
+        log::debug!("[BassaltNative] setIndexBuffer: buffer={:?}, index_format={:?}", buffer_id, index_format);
     } else {
         log::error!("setIndexBuffer: Invalid buffer handle: {}", buffer_handle);
     }
@@ -1797,7 +1778,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_draw
     base_vertex: jint,
     first_instance: jint,
 ) {
-    log::info!("NATIVE drawIndexed called: render_pass_ptr={}, indices={}", render_pass_ptr, index_count);
+    log::debug!("NATIVE drawIndexed called: render_pass_ptr={}, indices={}", render_pass_ptr, index_count);
 
     if render_pass_ptr == 0 {
         log::error!("NATIVE drawIndexed: render_pass_ptr is 0, returning early!");
@@ -1824,7 +1805,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_draw
         first_instance as u32,
     );
 
-    log::info!("NATIVE drawIndexed: Recorded draw (indices={}, instances={}, first={}, base={}, firstInst={})",
+    log::debug!("NATIVE drawIndexed: Recorded draw (indices={}, instances={}, first={}, base={}, firstInst={})",
         index_count, instance_count, first_index, base_vertex, first_instance);
 }
 
@@ -1952,7 +1933,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_endR
             // This fixes the race condition where present_frame could be called before rendering completes
             if let Some(texture_id) = output_texture {
                 device.set_main_framebuffer(texture_id);
-                log::info!("endRenderPass: Set main framebuffer to {:?} after successful render", texture_id);
+                log::debug!("endRenderPass: Set main framebuffer to {:?} after successful render", texture_id);
             } else {
                 log::debug!("endRenderPass: No output texture from this render pass");
             }
@@ -2186,7 +2167,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
                     // Find the correct binding slot by matching the uniform name
                     // Use wgpu-mc style direct name matching
                     let binding_slot = if let Some(ref pipeline_info) = pipeline_layout {
-                        log::info!("Looking for binding slot for uniform '{}', pipeline has {} bindings",
+                        log::debug!("Looking for binding slot for uniform '{}', pipeline has {} bindings",
                                    mc_name, pipeline_info.binding_layouts.len());
 
                         // First try: exact variable name match (case insensitive)
@@ -2196,7 +2177,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
                                     let matches = var_name.to_lowercase() == mc_name.to_lowercase() ||
                                         var_name.replace("_", "").to_lowercase() == mc_name.to_lowercase();
                                     if matches {
-                                        log::info!("  Exact match found: '{}' == '{}'", var_name, mc_name);
+                                        log::debug!("  Exact match found: '{}' == '{}'", var_name, mc_name);
                                     }
                                     matches
                                 } else {
@@ -2207,7 +2188,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
 
                         // Second try: fuzzy matching for known uniforms
                         if slot.is_none() {
-                            log::info!("  No exact match, trying fuzzy match for '{}'", mc_name);
+                            log::debug!("  No exact match, trying fuzzy match for '{}'", mc_name);
                             slot = match mc_name.as_str() {
                                 // For common uniforms, find matching uniform buffer by name patterns
                                 "Lighting" | "Projection" | "DynamicTransforms" | "DynamicUniforms" | "Fog" |
@@ -2238,7 +2219,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
                                                     (var_lower == "uniforms" && mc_simple == "transforms") ||
                                                     (var_lower == "transforms" && mc_simple == "uniforms");
                                                 if matches {
-                                                    log::info!("  Fuzzy match: '{}' ~= '{}' (base: '{}')",
+                                                    log::debug!("  Fuzzy match: '{}' ~= '{}' (base: '{}')",
                                                                var_name, mc_name, mc_simple);
                                                 }
                                                 matches
@@ -2279,7 +2260,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
                             buffer_info.size
                         };
 
-                        log::info!("Mapping uniform '{}' to binding slot {} (offset={}, size={})",
+                        log::debug!("Mapping uniform '{}' to binding slot {} (offset={}, size={})",
                                   mc_name, slot, offset, size);
                         builder = builder.add_uniform_buffer(slot, buffer_info.id, offset, size);
                     } else {
@@ -2339,10 +2320,10 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
             // and create empty bind groups for indices 1 and 2 if needed
             if _render_pass_ptr != 0 {
                 let state = unsafe { &mut *(_render_pass_ptr as *mut render_pass::RenderPassState) };
-                
+
                 // Set bind group 0
                 state.record_set_bind_group(0, Some(bind_group_id), Vec::new());
-                log::info!("Set bind group 0 with handle {} on render pass", handle);
+                log::debug!("Set bind group 0 with handle {} on render pass", handle);
             }
 
             handle as jlong
@@ -2719,7 +2700,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltCommandEnc
     ) {
         let _ = env.throw_new("java/lang/RuntimeException", &format!("Failed to write texture: {}", e));
     } else {
-        log::info!("Wrote {}x{} texture data ({} bytes) to texture {:?} at ({}, {}, layer={})",
+        log::debug!("Wrote {}x{} texture data ({} bytes) to texture {:?} at ({}, {}, layer={})",
                   width, height, data_vec.len(), texture_id, dest_x, dest_y, _depth_or_layer);
     }
 }
@@ -2927,7 +2908,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_sync_BassaltQuery_isTimest
 
     // Check if TIMESTAMP_QUERY feature is enabled
     if features.contains(wgt::Features::TIMESTAMP_QUERY) {
-        log::info!("Timestamp queries are supported");
+        log::debug!("Timestamp queries are supported");
         1
     } else {
         log::warn!("Timestamp queries are NOT supported on this device");
@@ -2963,7 +2944,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_sync_BassaltQuery_createTi
         num_queries.max(1) as u64,
     ) {
         Ok(queries) => {
-            log::info!("Created timestamp query set with {} queries", num_queries);
+            log::debug!("Created timestamp query set with {} queries", num_queries);
             // Box the query set and return as pointer
             Box::into_raw(Box::new(queries)) as jlong
         }
@@ -3203,7 +3184,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
         sample_count.max(1) as u32,
     ) {
         Ok(msaa_config) => {
-            log::info!("Created MSAA config: {}x{} with {} samples", width, height, msaa_config.sample_count);
+            log::debug!("Created MSAA config: {}x{} with {} samples", width, height, msaa_config.sample_count);
             // Box the config and return the pointer
             Box::into_raw(Box::new(msaa_config)) as jlong
         }
@@ -3318,4 +3299,275 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_dest
     let _encoder = unsafe { Box::from_raw(encoder_ptr as *mut wgpu_core::command::RenderBundleEncoder) };
 
     log::debug!("Destroyed render bundle encoder");
+}
+
+// ============================================================================
+// SHADER COMPILATION INFO SUPPORT
+// ============================================================================
+
+use crate::error::CompilationInfo;
+
+/// Get shader compilation info for WGSL source code
+///
+/// # Arguments
+/// - `wgsl_source` - WGSL shader source code as Java string
+///
+/// # Returns
+/// A pointer to boxed CompilationInfo, or 0 if the shader compiles successfully
+/// (with no errors/warnings) or on allocation failure.
+///
+/// # Safety
+/// The returned pointer must be freed with `destroyCompilationInfo`
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltBackend_getWgslCompilationInfo(
+    mut env: JNIEnv,
+    _class: JClass,
+    wgsl_source: JString,
+) -> jlong {
+    let source: String = match env.get_string(&wgsl_source) {
+        Ok(s) => s.into(),
+        Err(e) => {
+            log::error!("Failed to get WGSL source string: {}", e);
+            return 0;
+        }
+    };
+
+    let info = shader::get_wgsl_compilation_info(&source);
+
+    // Only return non-null if there are actual messages
+    if info.messages.is_empty() {
+        return 0;
+    }
+
+    Box::into_raw(Box::new(info)) as jlong
+}
+
+/// Get the number of messages in compilation info
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltBackend_getCompilationInfoMessageCount(
+    _env: JNIEnv,
+    _class: JClass,
+    info_ptr: jlong,
+) -> jint {
+    if info_ptr == 0 {
+        return 0;
+    }
+
+    let info = unsafe { &*(info_ptr as *const CompilationInfo) };
+    info.messages.len() as jint
+}
+
+/// Get the message text at a given index
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltBackend_getCompilationInfoMessage(
+    env: JNIEnv,
+    _class: JClass,
+    info_ptr: jlong,
+    index: jint,
+) -> jstring {
+    if info_ptr == 0 || index < 0 {
+        return std::ptr::null_mut();
+    }
+
+    let info = unsafe { &*(info_ptr as *const CompilationInfo) };
+    let idx = index as usize;
+
+    if idx >= info.messages.len() {
+        return std::ptr::null_mut();
+    }
+
+    match env.new_string(&info.messages[idx].message) {
+        Ok(s) => s.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Get the message type at a given index
+/// Returns: 0 = Error, 1 = Warning, 2 = Info
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltBackend_getCompilationInfoMessageType(
+    _env: JNIEnv,
+    _class: JClass,
+    info_ptr: jlong,
+    index: jint,
+) -> jint {
+    if info_ptr == 0 || index < 0 {
+        return 0;
+    }
+
+    let info = unsafe { &*(info_ptr as *const CompilationInfo) };
+    let idx = index as usize;
+
+    if idx >= info.messages.len() {
+        return 0;
+    }
+
+    info.messages[idx].message_type.to_i32()
+}
+
+/// Get the line number at a given index (1-based)
+/// Returns 0 if no location information is available
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltBackend_getCompilationInfoLineNumber(
+    _env: JNIEnv,
+    _class: JClass,
+    info_ptr: jlong,
+    index: jint,
+) -> jint {
+    if info_ptr == 0 || index < 0 {
+        return 0;
+    }
+
+    let info = unsafe { &*(info_ptr as *const CompilationInfo) };
+    let idx = index as usize;
+
+    if idx >= info.messages.len() {
+        return 0;
+    }
+
+    info.messages[idx]
+        .location
+        .as_ref()
+        .map(|loc| loc.line_number as jint)
+        .unwrap_or(0)
+}
+
+/// Get the line position (column) at a given index (1-based, in bytes)
+/// Returns 0 if no location information is available
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltBackend_getCompilationInfoLinePosition(
+    _env: JNIEnv,
+    _class: JClass,
+    info_ptr: jlong,
+    index: jint,
+) -> jint {
+    if info_ptr == 0 || index < 0 {
+        return 0;
+    }
+
+    let info = unsafe { &*(info_ptr as *const CompilationInfo) };
+    let idx = index as usize;
+
+    if idx >= info.messages.len() {
+        return 0;
+    }
+
+    info.messages[idx]
+        .location
+        .as_ref()
+        .map(|loc| loc.line_position as jint)
+        .unwrap_or(0)
+}
+
+/// Get the byte offset at a given index (0-based)
+/// Returns 0 if no location information is available
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltBackend_getCompilationInfoOffset(
+    _env: JNIEnv,
+    _class: JClass,
+    info_ptr: jlong,
+    index: jint,
+) -> jint {
+    if info_ptr == 0 || index < 0 {
+        return 0;
+    }
+
+    let info = unsafe { &*(info_ptr as *const CompilationInfo) };
+    let idx = index as usize;
+
+    if idx >= info.messages.len() {
+        return 0;
+    }
+
+    info.messages[idx]
+        .location
+        .as_ref()
+        .map(|loc| loc.offset as jint)
+        .unwrap_or(0)
+}
+
+/// Get the length in bytes at a given index
+/// Returns 0 if no location information is available
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltBackend_getCompilationInfoLength(
+    _env: JNIEnv,
+    _class: JClass,
+    info_ptr: jlong,
+    index: jint,
+) -> jint {
+    if info_ptr == 0 || index < 0 {
+        return 0;
+    }
+
+    let info = unsafe { &*(info_ptr as *const CompilationInfo) };
+    let idx = index as usize;
+
+    if idx >= info.messages.len() {
+        return 0;
+    }
+
+    info.messages[idx]
+        .location
+        .as_ref()
+        .map(|loc| loc.length as jint)
+        .unwrap_or(0)
+}
+
+/// Get the compilation info as a formatted string
+///
+/// This returns a human-readable string with all messages including
+/// line/column information where available.
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltBackend_getCompilationInfoString(
+    env: JNIEnv,
+    _class: JClass,
+    info_ptr: jlong,
+) -> jstring {
+    if info_ptr == 0 {
+        return match env.new_string("No compilation info") {
+            Ok(s) => s.into_raw(),
+            Err(_) => std::ptr::null_mut(),
+        };
+    }
+
+    let info = unsafe { &*(info_ptr as *const CompilationInfo) };
+
+    match env.new_string(info.to_string()) {
+        Ok(s) => s.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Check if the compilation info has any errors
+///
+/// Returns: 1 if there are errors, 0 otherwise
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltBackend_compilationInfoHasErrors(
+    _env: JNIEnv,
+    _class: JClass,
+    info_ptr: jlong,
+) -> jboolean {
+    if info_ptr == 0 {
+        return 0;
+    }
+
+    let info = unsafe { &*(info_ptr as *const CompilationInfo) };
+    if info.has_errors() { 1 } else { 0 }
+}
+
+/// Destroy compilation info and free memory
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltBackend_destroyCompilationInfo(
+    _env: JNIEnv,
+    _class: JClass,
+    info_ptr: jlong,
+) {
+    if info_ptr == 0 {
+        return;
+    }
+
+    // Take ownership of the boxed CompilationInfo and drop it
+    let _info = unsafe { Box::from_raw(info_ptr as *mut CompilationInfo) };
+
+    log::debug!("Destroyed compilation info");
 }

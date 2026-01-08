@@ -156,13 +156,8 @@ impl PipelineCache {
         log::debug!("Shader cache MISS: '{}' (hash: {:x})", label, source_hash);
         self.stats.write().shader_misses += 1;
 
-        // Parse WGSL to naga module
-        let naga_module = naga::front::wgsl::parse_str(wgsl_source)
-            .map_err(|e| BasaltError::ShaderParse {
-                error: e.to_string(),
-                line: None,
-                column: None,
-            })?;
+        // Parse WGSL to naga module with compilation info logging
+        let naga_module = crate::shader::parse_wgsl_named(wgsl_source, label)?;
 
         // Apply enhanced shader processing passes
         // This includes constant evaluation, bounds checking, terminator validation, etc.
@@ -364,7 +359,7 @@ impl PipelineCache {
                     write_mask: wgt::ColorWrites::ALL,
                 })]),
             }),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         };
 

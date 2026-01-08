@@ -37,12 +37,11 @@ pub enum RenderCommand {
         bind_group_id: Option<id::BindGroupId>,
         offsets: Vec<u32>,
     },
-    /// Set push constants for per-draw data
+    /// Set immediates for per-draw data (wgpu 28.0+)
     /// This allows passing small amounts of per-draw data without rebinding
-    SetPushConstants {
-        /// Shader stages that can access this data
-        stages: wgt::ShaderStages,
-        /// Byte offset within the push constant range
+    /// Immediates apply to all shader stages that use them (no stage specification needed)
+    SetImmediates {
+        /// Byte offset within the immediate data range
         offset: u32,
         /// Data to write (must be 4-byte aligned)
         data: Vec<u8>,
@@ -510,29 +509,25 @@ impl RenderPassState {
 
     /// Record a set push constants command
     ///
-    /// Push constants allow passing small amounts of per-draw data directly to shaders
+    /// Immediates allow passing small amounts of per-draw data directly to shaders
     /// without the overhead of creating and binding uniform buffers.
     ///
     /// # Arguments
-    /// * `stages` - Which shader stages can access this data
-    /// * `offset` - Byte offset within the push constant range (must be 4-byte aligned)
+    /// * `offset` - Byte offset within the immediate data range (must be 4-byte aligned)
     /// * `data` - The data to write (must be 4-byte aligned)
     ///
-    /// # Example usage in shaders (WGSL):
+    /// # Example usage in shaders (WGSL) for wgpu 28.0+:
     /// ```wgsl
-    /// var<push_constant> model_matrix: mat4x4<f32>;
+    /// var<immediate> model_matrix: mat4x4<f32>;
     /// ```
-    pub fn record_set_push_constants(&mut self, stages: wgt::ShaderStages, offset: u32, data: Vec<u8>) {
-        self.commands.push(RenderCommand::SetPushConstants { stages, offset, data });
+    pub fn record_set_immediates(&mut self, offset: u32, data: Vec<u8>) {
+        self.commands.push(RenderCommand::SetImmediates { offset, data });
     }
 
-    /// Record push constants for vertex and fragment stages (convenience method)
+    /// Record immediates (convenience method)
+    /// This method is kept for compatibility with the old API name
     pub fn record_set_push_constants_all(&mut self, offset: u32, data: &[u8]) {
-        self.record_set_push_constants(
-            wgt::ShaderStages::VERTEX | wgt::ShaderStages::FRAGMENT,
-            offset,
-            data.to_vec(),
-        );
+        self.record_set_immediates(offset, data.to_vec());
     }
 
     /// Set the maximum index count for validation (from index buffer size)
@@ -632,6 +627,7 @@ impl RenderPassState {
             depth_stencil_attachment: depth_stencil_attachment.as_ref(),
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,  // No multiview rendering (wgpu 28.0+)
         };
 
         // Take ownership of commands vec to execute them
@@ -737,9 +733,9 @@ impl RenderPassState {
                     // Debug markers are optional - log errors but don't fail
                     let _ = global.render_pass_insert_debug_marker(&mut render_pass, label, 0xFFFFFFFF);
                 }
-                RenderCommand::SetPushConstants { stages, offset, data } => {
-                    global.render_pass_set_push_constants(&mut render_pass, *stages, *offset, data)
-                        .map_err(|e| BasaltError::RenderPass(format!("Command {}: Failed to set push constants (offset={}, size={}): {:?}", cmd_index, offset, data.len(), e)))?;
+                RenderCommand::SetImmediates { offset, data } => {
+                    global.render_pass_set_immediates(&mut render_pass, *offset, data)
+                        .map_err(|e| BasaltError::RenderPass(format!("Command {}: Failed to set immediates (offset={}, size={}): {:?}", cmd_index, offset, data.len(), e)))?;
                 }
             }
         }
