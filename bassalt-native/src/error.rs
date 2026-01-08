@@ -343,3 +343,264 @@ impl BasaltError {
         }
     }
 }
+
+/// ============================================================================
+/// Shader Compilation Info Types (wgpu 28.0+)
+/// ============================================================================
+
+/// Compilation information for a shader module.
+///
+/// Corresponds to [WebGPU `GPUCompilationInfo`](https://gpuweb.github.io/gpuweb/#gpucompilationinfo).
+/// The source locations use bytes, and index a UTF-8 encoded string.
+///
+/// # Example
+/// ```rust
+/// let info = CompilationInfo {
+///     messages: vec![
+///         CompilationMessage {
+///             message: "unexpected token".to_string(),
+///             message_type: CompilationMessageType::Error,
+///             location: Some(SourceLocation {
+///                 line_number: 42,
+///                 line_position: 10,
+///                 offset: 1234,
+///                 length: 5,
+///             }),
+///         },
+///     ],
+/// };
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct CompilationInfo {
+    /// The messages from the shader compilation process.
+    pub messages: Vec<CompilationMessage>,
+}
+
+impl CompilationInfo {
+    /// Create empty compilation info (no errors or warnings)
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create compilation info from a single error message
+    pub fn from_error(message: impl Into<String>) -> Self {
+        Self {
+            messages: vec![CompilationMessage {
+                message: message.into(),
+                message_type: CompilationMessageType::Error,
+                location: None,
+            }],
+        }
+    }
+
+    /// Create compilation info from a single error message with location
+    pub fn from_error_with_location(
+        message: impl Into<String>,
+        line_number: u32,
+        line_position: u32,
+        offset: u32,
+        length: u32,
+    ) -> Self {
+        Self {
+            messages: vec![CompilationMessage {
+                message: message.into(),
+                message_type: CompilationMessageType::Error,
+                location: Some(SourceLocation {
+                    line_number,
+                    line_position,
+                    offset,
+                    length,
+                }),
+            }],
+        }
+    }
+
+    /// Check if there are any errors
+    pub fn has_errors(&self) -> bool {
+        self.messages
+            .iter()
+            .any(|m| m.message_type == CompilationMessageType::Error)
+    }
+
+    /// Get only error messages
+    pub fn errors(&self) -> Vec<&CompilationMessage> {
+        self.messages
+            .iter()
+            .filter(|m| m.message_type == CompilationMessageType::Error)
+            .collect()
+    }
+
+    /// Get only warning messages
+    pub fn warnings(&self) -> Vec<&CompilationMessage> {
+        self.messages
+            .iter()
+            .filter(|m| m.message_type == CompilationMessageType::Warning)
+            .collect()
+    }
+
+    /// Format all messages as a human-readable string
+    pub fn to_string(&self) -> String {
+        if self.messages.is_empty() {
+            return "No compilation messages".to_string();
+        }
+
+        self.messages
+            .iter()
+            .map(|msg| {
+                if let Some(loc) = &msg.location {
+                    format!(
+                        "{}:{}:{}: {}: {}",
+                        loc.line_number,
+                        loc.line_position,
+                        msg.message_type.as_str(),
+                        msg.message_type.as_str(),
+                        msg.message
+                    )
+                } else {
+                    format!("{}: {}", msg.message_type.as_str(), msg.message)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// A single message from the shader compilation process.
+///
+/// Roughly corresponds to [`GPUCompilationMessage`](https://www.w3.org/TR/webgpu/#gpucompilationmessage),
+/// except that the location uses UTF-8 for all positions.
+#[derive(Debug, Clone)]
+pub struct CompilationMessage {
+    /// The text of the message.
+    pub message: String,
+    /// The type of the message.
+    pub message_type: CompilationMessageType,
+    /// Where in the source code the message points at.
+    pub location: Option<SourceLocation>,
+}
+
+/// The type of a compilation message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompilationMessageType {
+    /// An error message.
+    Error = 0,
+    /// A warning message.
+    Warning = 1,
+    /// An informational message.
+    Info = 2,
+}
+
+impl CompilationMessageType {
+    /// Get the string representation of the message type
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warning => "warning",
+            Self::Info => "info",
+        }
+    }
+
+    /// Convert from integer (for JNI compatibility)
+    pub fn from_i32(value: i32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Error),
+            1 => Some(Self::Warning),
+            2 => Some(Self::Info),
+            _ => None,
+        }
+    }
+
+    /// Convert to integer (for JNI compatibility)
+    pub fn to_i32(self) -> i32 {
+        self as i32
+    }
+}
+
+/// A human-readable representation for a span, tailored for text source.
+///
+/// Roughly corresponds to the positional members of [`GPUCompilationMessage`][gcm] from
+/// the WebGPU specification, except:
+/// - `offset` and `length` are in bytes (UTF-8 code units), instead of UTF-16 code units.
+/// - `line_position` is in bytes (UTF-8 code units), and is usually not directly intended for humans.
+///
+/// [gcm]: https://www.w3.org/TR/webgpu/#gpucompilationmessage
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct SourceLocation {
+    /// 1-based line number.
+    pub line_number: u32,
+    /// 1-based column in code units (in bytes) of the start of the span.
+    /// Remember to convert accordingly when displaying to the user.
+    pub line_position: u32,
+    /// 0-based Offset in code units (in bytes) of the start of the span.
+    pub offset: u32,
+    /// Length in code units (in bytes) of the span.
+    pub length: u32,
+}
+
+impl SourceLocation {
+    /// Create a new source location
+    pub fn new(line_number: u32, line_position: u32, offset: u32, length: u32) -> Self {
+        Self {
+            line_number,
+            line_position,
+            offset,
+            length,
+        }
+    }
+
+    /// Create a source location from naga's SourceLocation
+    pub fn from_naga(loc: &naga::SourceLocation) -> Self {
+        Self {
+            line_number: loc.line_number,
+            line_position: loc.line_position,
+            offset: loc.offset,
+            length: loc.length,
+        }
+    }
+}
+
+/// Convert from naga WGSL parse errors
+#[cfg(feature = "wgsl")]
+impl From<naga::error::ShaderError<naga::front::wgsl::ParseError>> for CompilationInfo {
+    fn from(value: naga::error::ShaderError<naga::front::wgsl::ParseError>) -> Self {
+        Self {
+            messages: vec![CompilationMessage {
+                message: value.to_string(),
+                message_type: CompilationMessageType::Error,
+                location: value.inner.location(&value.source).map(|loc| SourceLocation::from_naga(&loc)),
+            }],
+        }
+    }
+}
+
+/// Convert from naga GLSL parse errors
+#[cfg(feature = "glsl")]
+impl From<naga::error::ShaderError<naga::front::glsl::ParseErrors>> for CompilationInfo {
+    fn from(value: naga::error::ShaderError<naga::front::glsl::ParseErrors>) -> Self {
+        let messages = value
+            .inner
+            .errors
+            .into_iter()
+            .map(|err| CompilationMessage {
+                message: err.to_string(),
+                message_type: CompilationMessageType::Error,
+                location: err.location(&value.source).map(|loc| SourceLocation::from_naga(&loc)),
+            })
+            .collect();
+        CompilationInfo { messages }
+    }
+}
+
+/// Convert from naga validation errors
+impl From<naga::error::ShaderError<naga::WithSpan<naga::valid::ValidationError>>> for CompilationInfo {
+    fn from(value: naga::error::ShaderError<naga::WithSpan<naga::valid::ValidationError>>) -> Self {
+        Self {
+            messages: vec![CompilationMessage {
+                message: value.to_string(),
+                message_type: CompilationMessageType::Error,
+                location: value.inner.location(&value.source).map(|loc| SourceLocation::from_naga(&loc)),
+            }],
+        }
+    }
+}

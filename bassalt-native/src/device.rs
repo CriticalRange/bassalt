@@ -6,6 +6,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use wgpu_core::id;
 use wgpu_types as wgt;
 
+// wgpu 28.0: Import LoadOpDontCare token for DontCare load op
+use wgt::LoadOpDontCare;
+
 use crate::context::BasaltContext;
 use crate::surface::BasaltSurface;
 use crate::pipeline_registry::PipelineCache;
@@ -269,13 +272,8 @@ impl BasaltDevice {
         let pl_desc = wgpu_core::binding_model::PipelineLayoutDescriptor {
             label: Some(Cow::Borrowed("Bassalt Shared Pipeline Layout")),
             bind_group_layouts: Cow::Owned(vec![bgl_id]),
-            // Push constants for per-draw data (128 bytes = 2 mat4x4)
-            push_constant_ranges: Cow::Owned(vec![
-                wgt::PushConstantRange {
-                    stages: wgt::ShaderStages::VERTEX | wgt::ShaderStages::FRAGMENT,
-                    range: 0..128,
-                },
-            ]),
+            // Immediates for per-draw data (128 bytes = 2 mat4x4)
+            immediate_size: 128,
         };
 
         let (pl_id, pl_error) = global.device_create_pipeline_layout(device_id, &pl_desc, None);
@@ -329,7 +327,7 @@ impl BasaltDevice {
     /// Used when MC doesn't provide depth texture but pipeline requires it
     pub fn get_or_create_depth_view(&self, width: u32, height: u32) -> Result<id::TextureViewId> {
         let key = (width, height);
-        
+
         // Check cache first
         {
             let cache = self.depth_texture_cache.lock();
@@ -338,9 +336,13 @@ impl BasaltDevice {
                 return Ok(*view_id);
             }
         }
-        
+
         // Create new depth texture
         log::info!("Creating depth texture for {}x{}", width, height);
+
+        // wgpu 28.0: Use MemoryUsage hint for depth buffers (reduces memory footprint)
+        // Depth buffers are only used during rendering and don't need to persist
+        // Note: memory_hints is a device-level property, not per-texture
         let depth_desc = wgt::TextureDescriptor {
             label: Some(Cow::Borrowed("Cached Depth Texture")),
             size: wgt::Extent3d {
@@ -555,7 +557,7 @@ impl BasaltDevice {
             ],
             mag_filter: wgt::FilterMode::Linear,
             min_filter: wgt::FilterMode::Linear,
-            mipmap_filter: wgt::FilterMode::Nearest,
+            mipmap_filter: wgt::MipmapFilterMode::Nearest,
             lod_min_clamp: 0.0,
             lod_max_clamp: 0.0,
             compare: None,
@@ -617,10 +619,11 @@ impl BasaltDevice {
         }
 
         // Create render pass
+        // wgpu 28.0: Use DontCare since blit shader overwrites all pixels (performance optimization)
         let color_attachments = vec![Some(wgpu_core::command::RenderPassColorAttachment {
             view: dst_view,
             resolve_target: None,
-            load_op: wgpu_core::command::LoadOp::Load, // Don't clear, we'll overwrite everything
+            load_op: wgpu_core::command::LoadOp::DontCare(unsafe { LoadOpDontCare::enabled() }),
             store_op: wgpu_core::command::StoreOp::Store,
             depth_slice: None,
         })];
@@ -631,6 +634,7 @@ impl BasaltDevice {
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,  // No multiview (wgpu 28.0+)
         };
 
         // Begin render pass
@@ -743,7 +747,7 @@ impl BasaltDevice {
         let pipeline_layout_desc = wgpu_core::binding_model::PipelineLayoutDescriptor {
             label: Some(Cow::Borrowed("Blit Pipeline Layout")),
             bind_group_layouts: Cow::Borrowed(&[bgl_id]),
-            push_constant_ranges: Cow::Borrowed(&[]),
+            immediate_size: 0,  // No immediates needed for blit shader
         };
 
         let (pipeline_layout_id, error) = self.context.inner().device_create_pipeline_layout(
@@ -821,7 +825,7 @@ impl BasaltDevice {
                     write_mask: wgt::ColorWrites::ALL,
                 })]),
             }),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         };
 
@@ -999,6 +1003,7 @@ impl BasaltDevice {
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,  // No multiview (wgpu 28.0+)
         };
 
         // Begin and immediately end the render pass (just clears)
@@ -1711,6 +1716,7 @@ impl BasaltDevice {
             depth_stencil_attachment: depth_stencil_attachment.as_ref(),
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,  // No multiview (wgpu 28.0+)
         };
 
         // Begin and immediately end the render pass (clears happen on load)
@@ -2105,10 +2111,10 @@ impl BasaltDevice {
         })
     }
 
-    fn map_mipmap_filter(&self, mode: u32) -> Result<wgt::FilterMode> {
+    fn map_mipmap_filter(&self, mode: u32) -> Result<wgt::MipmapFilterMode> {
         Ok(match mode {
-            0 => wgt::FilterMode::Nearest,
-            1 => wgt::FilterMode::Linear,
+            0 => wgt::MipmapFilterMode::Nearest,
+            1 => wgt::MipmapFilterMode::Linear,
             _ => return Err(BasaltError::invalid_parameter("mode", format!("Unknown mipmap filter: {}", mode))),
         })
     }
@@ -2155,13 +2161,8 @@ impl BasaltDevice {
     }
 
     fn parse_wgsl(&self, wgsl: &str) -> Result<naga::Module> {
-        naga::front::wgsl::parse_str(&wgsl).map_err(|e| {
-            BasaltError::ShaderParse {
-                error: e.to_string(),
-                line: None,
-                column: None,
-            }
-        })
+        // Use the shader module's parse function which logs compilation info
+        crate::shader::parse_wgsl_named(wgsl, "device_shader")
     }
 }
 
@@ -2479,8 +2480,7 @@ pub fn create_device_from_window(
 
     // Build required features with advanced capabilities if available
     // Start with base features required by Bassalt
-    let mut required_features = wgt::Features::DEPTH_CLIP_CONTROL
-        | wgt::Features::PUSH_CONSTANTS;
+    let mut required_features = wgt::Features::DEPTH_CLIP_CONTROL;  // PUSH_CONSTANTS removed in wgpu 28.0 (immediates always available)
 
     // Enable timestamp queries if available (for GPU profiling)
     if adapter_features.contains(wgt::Features::TIMESTAMP_QUERY) {
@@ -2500,13 +2500,42 @@ pub fn create_device_from_window(
         // Note: RENDER_BUNDLE is always available in wgpu 27.0
     }
 
+    // wgpu 28.0: Detect and enable advanced features
+
+    // Barycentric coordinates for advanced shader effects
+    if adapter_features.contains(wgt::Features::SHADER_BARYCENTRICS) {
+        log::info!("Adapter supports SHADER_BARYCENTRICS - barycentric coordinates available");
+        required_features |= wgt::Features::SHADER_BARYCENTRICS;
+    }
+
+    // Subgroup operations for compute shader optimization
+    if adapter_features.contains(wgt::Features::SUBGROUP) {
+        log::info!("Adapter supports SUBGROUP - subgroup operations available");
+        required_features |= wgt::Features::SUBGROUP;
+    }
+    if adapter_features.contains(wgt::Features::SUBGROUP_VERTEX) {
+        log::info!("Adapter supports SUBGROUP_VERTEX - vertex stage subgroup operations available");
+        required_features |= wgt::Features::SUBGROUP_VERTEX;
+    }
+    if adapter_features.contains(wgt::Features::SUBGROUP_BARRIER) {
+        log::info!("Adapter supports SUBGROUP_BARRIER - subgroup barriers available");
+        required_features |= wgt::Features::SUBGROUP_BARRIER;
+    }
+
+    // Multisample array textures for advanced anti-aliasing
+    if adapter_features.contains(wgt::Features::MULTISAMPLE_ARRAY) {
+        log::info!("Adapter supports MULTISAMPLE_ARRAY - multisampled array textures available");
+        required_features |= wgt::Features::MULTISAMPLE_ARRAY;
+    }
+
+
     // Request device with required features (matching wgpu-mc)
     // wgpu 27.0 requires explicit memory_hints and experimental_features
     let device_desc = wgt::DeviceDescriptor {
         label: Some(Cow::Borrowed("Bassalt Device")),
         required_features,
         required_limits: wgt::Limits {
-            max_push_constant_size: 128,
+            // max_push_constant_size removed in wgpu 28.0 (immediates don't use limits)
             max_bind_groups: 8,
             ..wgt::Limits::default()
         },

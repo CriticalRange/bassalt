@@ -169,7 +169,7 @@ impl BindGroupBuilder {
                             binding_model::BufferBinding {
                                 buffer: *buffer_id,
                                 offset: *offset,
-                                size: Some(*size),
+                                size: Some(size.get()),  // wgpu 28.0: BufferBinding size now takes u64, not NonZero<u64>
                             },
                         ),
                     });
@@ -368,7 +368,7 @@ impl BindGroupBuilder {
                                     binding_model::BufferBinding {
                                         buffer: *buffer_id,
                                         offset: *offset,
-                                        size: binding_size,
+                                        size: binding_size.map(|nz| nz.get()),  // wgpu 28.0: Convert NonZero<u64> to u64
                                     },
                                 ),
                             });

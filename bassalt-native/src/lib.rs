@@ -1265,13 +1265,8 @@ fn create_layout_from_shaders(
     let pl_desc = binding_model::PipelineLayoutDescriptor {
         label: Some(Cow::Borrowed("Pipeline Layout")),
         bind_group_layouts: Cow::Owned(vec![bgl_id]),
-        // Push constants: 128 bytes for model matrix + other per-draw data
-        push_constant_ranges: Cow::Owned(vec![
-            wgt::PushConstantRange {
-                stages: wgt::ShaderStages::VERTEX | wgt::ShaderStages::FRAGMENT,
-                range: 0..128,
-            },
-        ]),
+        // Immediates: 128 bytes for model matrix + other per-draw data
+        immediate_size: 128,
     };
 
     let (pl_id, pl_error) = global.device_create_pipeline_layout(device_id, &pl_desc, None);
@@ -1306,8 +1301,6 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
     blend_src_alpha_factor: jint,
     blend_dst_alpha_factor: jint,
 ) -> jlong {
-    use naga::front;
-
     // Validate device pointer
     if device_ptr == 0 {
         let _ = env.throw_new("java/lang/IllegalArgumentException", "Null device pointer");
@@ -1349,20 +1342,20 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
 
     // Parse WGSL shaders once for layout creation and caching
     log::debug!("Parsing WGSL shaders for layout reflection...");
-    let vertex_module = match front::wgsl::parse_str(&vertex_wgsl) {
+    let vertex_module = match shader::parse_wgsl_named(&vertex_wgsl, "vertex_shader") {
         Ok(module) => module,
         Err(e) => {
-            let msg = format!("Failed to parse vertex WGSL: {:?}", e);
+            let msg = format!("Failed to parse vertex WGSL: {}", e);
             log::error!("{}", msg);
             let _ = env.throw_new("java/lang/RuntimeException", &msg);
             return 0;
         }
     };
 
-    let fragment_module = match front::wgsl::parse_str(&fragment_wgsl) {
+    let fragment_module = match shader::parse_wgsl_named(&fragment_wgsl, "fragment_shader") {
         Ok(module) => module,
         Err(e) => {
-            let msg = format!("Failed to parse fragment WGSL: {:?}", e);
+            let msg = format!("Failed to parse fragment WGSL: {}", e);
             log::error!("{}", msg);
             let _ = env.throw_new("java/lang/RuntimeException", &msg);
             return 0;
@@ -1428,16 +1421,8 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
 
     // Depth format - check if fragment shader writes depth, otherwise disable depth testing
     // GUI shaders and other 2D shaders don't write depth, so they shouldn't have depth state
-    let fragment_naga_module = match naga::front::wgsl::parse_str(&fragment_wgsl) {
-        Ok(module) => module,
-        Err(e) => {
-            let msg = format!("Failed to parse fragment WGSL for depth analysis: {:?}", e);
-            log::error!("{}", msg);
-            let _ = env.throw_new("java/lang/RuntimeException", &msg);
-            return 0;
-        }
-    };
-    let shader_has_depth_output = shader_writes_depth(&fragment_naga_module);
+    // Note: fragment_module was already parsed above, reuse it instead of re-parsing
+    let shader_has_depth_output = shader_writes_depth(&fragment_module);
     let depth_format = if shader_has_depth_output {
         resource_handles::PipelineDepthFormat::Depth32Float
     } else {
@@ -3314,4 +3299,275 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_dest
     let _encoder = unsafe { Box::from_raw(encoder_ptr as *mut wgpu_core::command::RenderBundleEncoder) };
 
     log::debug!("Destroyed render bundle encoder");
+}
+
+// ============================================================================
+// SHADER COMPILATION INFO SUPPORT
+// ============================================================================
+
+use crate::error::CompilationInfo;
+
+/// Get shader compilation info for WGSL source code
+///
+/// # Arguments
+/// - `wgsl_source` - WGSL shader source code as Java string
+///
+/// # Returns
+/// A pointer to boxed CompilationInfo, or 0 if the shader compiles successfully
+/// (with no errors/warnings) or on allocation failure.
+///
+/// # Safety
+/// The returned pointer must be freed with `destroyCompilationInfo`
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltBackend_getWgslCompilationInfo(
+    mut env: JNIEnv,
+    _class: JClass,
+    wgsl_source: JString,
+) -> jlong {
+    let source: String = match env.get_string(&wgsl_source) {
+        Ok(s) => s.into(),
+        Err(e) => {
+            log::error!("Failed to get WGSL source string: {}", e);
+            return 0;
+        }
+    };
+
+    let info = shader::get_wgsl_compilation_info(&source);
+
+    // Only return non-null if there are actual messages
+    if info.messages.is_empty() {
+        return 0;
+    }
+
+    Box::into_raw(Box::new(info)) as jlong
+}
+
+/// Get the number of messages in compilation info
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltBackend_getCompilationInfoMessageCount(
+    _env: JNIEnv,
+    _class: JClass,
+    info_ptr: jlong,
+) -> jint {
+    if info_ptr == 0 {
+        return 0;
+    }
+
+    let info = unsafe { &*(info_ptr as *const CompilationInfo) };
+    info.messages.len() as jint
+}
+
+/// Get the message text at a given index
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltBackend_getCompilationInfoMessage(
+    env: JNIEnv,
+    _class: JClass,
+    info_ptr: jlong,
+    index: jint,
+) -> jstring {
+    if info_ptr == 0 || index < 0 {
+        return std::ptr::null_mut();
+    }
+
+    let info = unsafe { &*(info_ptr as *const CompilationInfo) };
+    let idx = index as usize;
+
+    if idx >= info.messages.len() {
+        return std::ptr::null_mut();
+    }
+
+    match env.new_string(&info.messages[idx].message) {
+        Ok(s) => s.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Get the message type at a given index
+/// Returns: 0 = Error, 1 = Warning, 2 = Info
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltBackend_getCompilationInfoMessageType(
+    _env: JNIEnv,
+    _class: JClass,
+    info_ptr: jlong,
+    index: jint,
+) -> jint {
+    if info_ptr == 0 || index < 0 {
+        return 0;
+    }
+
+    let info = unsafe { &*(info_ptr as *const CompilationInfo) };
+    let idx = index as usize;
+
+    if idx >= info.messages.len() {
+        return 0;
+    }
+
+    info.messages[idx].message_type.to_i32()
+}
+
+/// Get the line number at a given index (1-based)
+/// Returns 0 if no location information is available
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltBackend_getCompilationInfoLineNumber(
+    _env: JNIEnv,
+    _class: JClass,
+    info_ptr: jlong,
+    index: jint,
+) -> jint {
+    if info_ptr == 0 || index < 0 {
+        return 0;
+    }
+
+    let info = unsafe { &*(info_ptr as *const CompilationInfo) };
+    let idx = index as usize;
+
+    if idx >= info.messages.len() {
+        return 0;
+    }
+
+    info.messages[idx]
+        .location
+        .as_ref()
+        .map(|loc| loc.line_number as jint)
+        .unwrap_or(0)
+}
+
+/// Get the line position (column) at a given index (1-based, in bytes)
+/// Returns 0 if no location information is available
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltBackend_getCompilationInfoLinePosition(
+    _env: JNIEnv,
+    _class: JClass,
+    info_ptr: jlong,
+    index: jint,
+) -> jint {
+    if info_ptr == 0 || index < 0 {
+        return 0;
+    }
+
+    let info = unsafe { &*(info_ptr as *const CompilationInfo) };
+    let idx = index as usize;
+
+    if idx >= info.messages.len() {
+        return 0;
+    }
+
+    info.messages[idx]
+        .location
+        .as_ref()
+        .map(|loc| loc.line_position as jint)
+        .unwrap_or(0)
+}
+
+/// Get the byte offset at a given index (0-based)
+/// Returns 0 if no location information is available
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltBackend_getCompilationInfoOffset(
+    _env: JNIEnv,
+    _class: JClass,
+    info_ptr: jlong,
+    index: jint,
+) -> jint {
+    if info_ptr == 0 || index < 0 {
+        return 0;
+    }
+
+    let info = unsafe { &*(info_ptr as *const CompilationInfo) };
+    let idx = index as usize;
+
+    if idx >= info.messages.len() {
+        return 0;
+    }
+
+    info.messages[idx]
+        .location
+        .as_ref()
+        .map(|loc| loc.offset as jint)
+        .unwrap_or(0)
+}
+
+/// Get the length in bytes at a given index
+/// Returns 0 if no location information is available
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltBackend_getCompilationInfoLength(
+    _env: JNIEnv,
+    _class: JClass,
+    info_ptr: jlong,
+    index: jint,
+) -> jint {
+    if info_ptr == 0 || index < 0 {
+        return 0;
+    }
+
+    let info = unsafe { &*(info_ptr as *const CompilationInfo) };
+    let idx = index as usize;
+
+    if idx >= info.messages.len() {
+        return 0;
+    }
+
+    info.messages[idx]
+        .location
+        .as_ref()
+        .map(|loc| loc.length as jint)
+        .unwrap_or(0)
+}
+
+/// Get the compilation info as a formatted string
+///
+/// This returns a human-readable string with all messages including
+/// line/column information where available.
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltBackend_getCompilationInfoString(
+    env: JNIEnv,
+    _class: JClass,
+    info_ptr: jlong,
+) -> jstring {
+    if info_ptr == 0 {
+        return match env.new_string("No compilation info") {
+            Ok(s) => s.into_raw(),
+            Err(_) => std::ptr::null_mut(),
+        };
+    }
+
+    let info = unsafe { &*(info_ptr as *const CompilationInfo) };
+
+    match env.new_string(info.to_string()) {
+        Ok(s) => s.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Check if the compilation info has any errors
+///
+/// Returns: 1 if there are errors, 0 otherwise
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltBackend_compilationInfoHasErrors(
+    _env: JNIEnv,
+    _class: JClass,
+    info_ptr: jlong,
+) -> jboolean {
+    if info_ptr == 0 {
+        return 0;
+    }
+
+    let info = unsafe { &*(info_ptr as *const CompilationInfo) };
+    if info.has_errors() { 1 } else { 0 }
+}
+
+/// Destroy compilation info and free memory
+#[no_mangle]
+pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltBackend_destroyCompilationInfo(
+    _env: JNIEnv,
+    _class: JClass,
+    info_ptr: jlong,
+) {
+    if info_ptr == 0 {
+        return;
+    }
+
+    // Take ownership of the boxed CompilationInfo and drop it
+    let _info = unsafe { Box::from_raw(info_ptr as *mut CompilationInfo) };
+
+    log::debug!("Destroyed compilation info");
 }

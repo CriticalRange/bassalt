@@ -56,6 +56,12 @@ impl BasaltSurface {
         self.surface_id
     }
 
+    /// wgpu 28.0: Get the current surface configuration
+    /// Returns the configuration if the surface has been configured
+    pub fn get_configuration(&self) -> Option<&wgt::SurfaceConfiguration<Vec<wgt::TextureFormat>>> {
+        self.config.as_ref()
+    }
+
     /// Get the supported formats for this surface
     pub fn get_supported_formats(
         &self,

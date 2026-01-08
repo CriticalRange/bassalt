@@ -11,10 +11,10 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # WebGPU - core rendering
-wgpu-core = { version = "27.0", features = ["raw-window-handle"] }
-wgpu-types = "27.0"
-wgpu-hal = "27.0"
-naga = { version = "27.0", features = ["wgsl-out", "glsl-in", "spv-in"] }
+wgpu-core = { version = "28.0", features = ["raw-window-handle"] }
+wgpu-types = "28.0"
+wgpu-hal = "28.0"
+naga = { version = "28.0", features = ["wgsl-out", "glsl-in", "spv-in"] }
 
 # JNI
 jni = "0.21"
