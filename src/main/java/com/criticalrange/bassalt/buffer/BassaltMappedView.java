@@ -47,6 +47,10 @@ public class BassaltMappedView implements GpuBuffer.MappedView {
         // Use the cached shadow buffer from BassaltBuffer
         // This preserves data across map()/unmap() calls, just like OpenGL's persistent buffers
         this.shadowBuffer = shadowBuffer;
+
+        // CRITICAL: Ensure LITTLE_ENDIAN byte order for correct float/int data interpretation
+        // This was previously set as a side effect of debug code, but is essential for correctness
+        shadowBuffer.order(java.nio.ByteOrder.LITTLE_ENDIAN);
     }
 
     @Override

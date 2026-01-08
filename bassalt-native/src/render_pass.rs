@@ -238,7 +238,7 @@ impl RenderPassState {
             width,
             height,
         });
-        log::info!("Set default viewport and scissor: {}x{}", width, height);
+        log::debug!("Set default viewport and scissor: {}x{}", width, height);
 
         Ok(state)
     }
@@ -275,7 +275,7 @@ impl RenderPassState {
                 // Depth test enabled but no write = read-only
                 DepthMode::ReadOnly
             };
-            log::info!("First pipeline set: depth_mode={:?} (write={}, test={}, has_depth={})",
+            log::debug!("First pipeline set: depth_mode={:?} (write={}, test={}, has_depth={})",
                 self.depth_mode, depth_write_enabled, depth_test_enabled, has_depth_output);
         } else {
             // Validate compatibility with existing depth mode
@@ -553,7 +553,7 @@ impl RenderPassState {
             return Ok(None);
         }
 
-        log::info!("Finishing render pass with {} commands, color_view={:?}", 
+        log::debug!("Finishing render pass with {} commands, color_view={:?}", 
             self.commands.len(), self.color_view);
 
         let global = context.inner();
@@ -563,10 +563,10 @@ impl RenderPassState {
         let mut color_attachments = Vec::new();
         if let Some(view) = self.color_view {
             let load_op = if self.should_clear_color {
-                log::info!("Color attachment: CLEAR with {:?}", self.clear_color);
+                log::debug!("Color attachment: CLEAR with {:?}", self.clear_color);
                 wgpu_core::command::LoadOp::Clear(self.clear_color)
             } else {
-                log::info!("Color attachment: LOAD (preserving previous content)");
+                log::debug!("Color attachment: LOAD (preserving previous content)");
                 wgpu_core::command::LoadOp::Load
             };
             color_attachments.push(Some(wgpu_core::command::RenderPassColorAttachment {
@@ -617,7 +617,7 @@ impl RenderPassState {
                 }
             })
         } else {
-            log::info!("Skipping depth attachment (depth_mode={:?}, depth_view={:?})", self.depth_mode, self.depth_view.is_some());
+            log::debug!("Skipping depth attachment (depth_mode={:?}, depth_view={:?})", self.depth_mode, self.depth_view.is_some());
             None
         };
 
@@ -645,7 +645,7 @@ impl RenderPassState {
             log::debug!("Depth-only render pass (shadow rendering or depth pre-pass)");
         }
 
-        log::info!("Beginning render pass with {} color attachments, depth={}",
+        log::debug!("Beginning render pass with {} color attachments, depth={}",
             color_attachments.len(),
             depth_stencil_attachment.is_some());
 
@@ -687,7 +687,7 @@ impl RenderPassState {
                     base_vertex,
                     first_instance,
                 } => {
-                    log::info!(">>> EXECUTING DRAW: indices={}, instances={}, first_idx={}, base_vtx={}",
+                    log::debug!(">>> EXECUTING DRAW: indices={}, instances={}, first_idx={}, base_vtx={}",
                         index_count, instance_count, first_index, base_vertex);
                     global.render_pass_draw_indexed(
                         &mut render_pass,
@@ -781,7 +781,7 @@ impl RenderPassState {
         // This is set AFTER rendering completes, avoiding the race condition
         let output = self.output_texture;
         if output.is_some() {
-            log::info!("Render pass completed, output texture: {:?} (ready for presentation)", output);
+            log::debug!("Render pass completed, output texture: {:?} (ready for presentation)", output);
         }
 
         Ok(output)

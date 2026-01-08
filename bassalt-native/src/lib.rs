@@ -1265,8 +1265,8 @@ fn create_layout_from_shaders(
     let pl_desc = binding_model::PipelineLayoutDescriptor {
         label: Some(Cow::Borrowed("Pipeline Layout")),
         bind_group_layouts: Cow::Owned(vec![bgl_id]),
-        // Immediates: 128 bytes for model matrix + other per-draw data
-        immediate_size: 128,
+        // No immediates - using uniform buffers via bind groups instead
+        immediate_size: 0,
     };
 
     let (pl_id, pl_error) = global.device_create_pipeline_layout(device_id, &pl_desc, None);

@@ -2063,25 +2063,25 @@ impl BasaltDevice {
         const DEPTH32F: u32 = 8;
         const DEPTH24_STENCIL8: u32 = 9;
 
-        // NOTE: sRGB format support with RGBA/BGRA channel swapping
-        // ==========================================================
+        // NOTE: RGBA/BGRA channel swapping for correct texture rendering
+        // =============================================================
         // Minecraft textures use RGBA byte order (Red=0, Green=1, Blue=2, Alpha=3)
         // Most GPUs prefer BGRA for better performance, so the swapchain uses BGRA
         // To match these, we need to create textures in BGRA format when MC sends RGBA data
         //
         // Format mapping:
-        // - RGBA8 (MC's format) → Bgra8UnormSrgb (GPU's preferred format)
-        // - BGRA8 → Rgba8UnormSrgb (inverse mapping for completeness)
-        // - RGB8 → Bgra8UnormSrgb (add alpha channel)
+        // - RGBA8 (MC's format) → Bgra8Unorm (GPU's preferred format)
+        // - BGRA8 → Rgba8Unorm (inverse mapping for completeness)
+        // - RGB8 → Bgra8Unorm (add alpha channel)
         //
         // This ensures MC's RGBA (0,0,255) texture data renders as blue on BGRA framebuffer
         // instead of being incorrectly interpreted as red (255,0,0).
 
         Ok(match format {
             // Map MC's RGBA data to BGRA textures for correct rendering
-            RGBA8 => wgt::TextureFormat::Bgra8UnormSrgb,  // MC RGBA → GPU BGRA
-            BGRA8 => wgt::TextureFormat::Rgba8UnormSrgb,  // MC BGRA → GPU RGBA (inverse)
-            RGB8 => wgt::TextureFormat::Bgra8UnormSrgb,   // MC RGB → GPU BGRA (add alpha)
+            RGBA8 => wgt::TextureFormat::Bgra8Unorm,  // MC RGBA → GPU BGRA
+            BGRA8 => wgt::TextureFormat::Rgba8Unorm,  // MC BGRA → GPU RGBA (inverse)
+            RGB8 => wgt::TextureFormat::Bgra8Unorm,   // MC RGB → GPU BGRA (add alpha)
             RG8 => wgt::TextureFormat::Rg8Unorm,
             R8 => wgt::TextureFormat::R8Unorm,
             RGBA16F => wgt::TextureFormat::Rgba16Float,
@@ -2562,20 +2562,19 @@ pub fn create_device_from_window(
         .surface_get_capabilities(surface_id, adapter_id)
         .map_err(|e| BasaltError::surface(format!("Failed to get surface capabilities: {:?}", e)))?;
 
-    // Prefer sRGB formats for correct color rendering (Minecraft expects sRGB)
-    // Try Bgra8UnormSrgb first (GPU's preferred format), then fallbacks
-    // Note: MC's RGBA texture data will be converted to BGRA in map_texture_format_public
+    // Prefer Bgra8Unorm (standard for most displays, what wgpu-mc uses)
+    // Fall back to Bgra8UnormSrgb, then Rgba variants, then first available
     let surface_format = surface_caps
         .formats
         .iter()
         .copied()
-        .find(|f| matches!(f, wgt::TextureFormat::Bgra8UnormSrgb))
+        .find(|f| matches!(f, wgt::TextureFormat::Bgra8Unorm))
         .or_else(|| {
             surface_caps
                 .formats
                 .iter()
                 .copied()
-                .find(|f| matches!(f, wgt::TextureFormat::Bgra8Unorm))
+                .find(|f| matches!(f, wgt::TextureFormat::Bgra8UnormSrgb))
         })
         .or_else(|| {
             surface_caps

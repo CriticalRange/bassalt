@@ -251,7 +251,7 @@ impl BindGroupBuilder {
             })
             .collect();
         
-        log::info!("build_with_layout: {} textures, {} samplers, {} uniforms available; layout expects {} bindings",
+        log::debug!("build_with_layout: {} textures, {} samplers, {} uniforms available; layout expects {} bindings",
             texture_entries.len(), sampler_entries.len(), uniform_entries.len(), binding_layouts.len());
         
         for (i, layout) in binding_layouts.iter().enumerate() {
