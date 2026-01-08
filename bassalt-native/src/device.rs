@@ -2480,7 +2480,7 @@ pub fn create_device_from_window(
 
     // Build required features with advanced capabilities if available
     // Start with base features required by Bassalt
-    let mut required_features = wgt::Features::DEPTH_CLIP_CONTROL;  // PUSH_CONSTANTS removed in wgpu 28.0 (immediates always available)
+    let mut required_features = wgt::Features::DEPTH_CLIP_CONTROL | wgt::Features::IMMEDIATES;
 
     // Enable timestamp queries if available (for GPU profiling)
     if adapter_features.contains(wgt::Features::TIMESTAMP_QUERY) {
@@ -2535,7 +2535,8 @@ pub fn create_device_from_window(
         label: Some(Cow::Borrowed("Bassalt Device")),
         required_features,
         required_limits: wgt::Limits {
-            // max_push_constant_size removed in wgpu 28.0 (immediates don't use limits)
+            // Immediates (push constants) require max_immediate_size to be set
+            max_immediate_size: 128,
             max_bind_groups: 8,
             ..wgt::Limits::default()
         },
