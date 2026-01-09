@@ -96,7 +96,8 @@ public class BassaltDevice implements GpuDevice {
             boolean depthTestEnabled, boolean depthWriteEnabled,
             int depthCompare, boolean blendEnabled,
             int blendSrcColorFactor, int blendDstColorFactor,
-            int blendSrcAlphaFactor, int blendDstAlphaFactor);
+            int blendSrcAlphaFactor, int blendDstAlphaFactor,
+            String shaderName);
 
     // Render pass operations
     public static native long beginRenderPass(long ptr, long colorTexture, long depthTexture,
@@ -329,7 +330,8 @@ public class BassaltDevice implements GpuDevice {
                 blendSrcColorFactor,
                 blendDstColorFactor,
                 blendSrcAlphaFactor,
-                blendDstAlphaFactor);
+                blendDstAlphaFactor,
+                pipeline.getLocation().toString());
 
         BassaltCompiledRenderPipeline compiled = new BassaltCompiledRenderPipeline(this, nativePipelinePtr);
         pipelineCache.put(cacheKey, compiled);
@@ -660,7 +662,20 @@ public class BassaltDevice implements GpuDevice {
         return createNativePipelineFromWgsl(nativePtr, vertexWgsl, fragmentWgsl,
                 vertexFormat, primitiveTopology, depthTestEnabled, depthWriteEnabled,
                 depthCompare, blendEnabled, blendSrcColorFactor, blendDstColorFactor,
-                blendSrcAlphaFactor, blendDstAlphaFactor);
+                blendSrcAlphaFactor, blendDstAlphaFactor, "unknown");
+    }
+
+    public long createNativePipeline(String vertexWgsl, String fragmentWgsl,
+            int vertexFormat, int primitiveTopology,
+            boolean depthTestEnabled, boolean depthWriteEnabled,
+            int depthCompare, boolean blendEnabled,
+            int blendSrcColorFactor, int blendDstColorFactor,
+            int blendSrcAlphaFactor, int blendDstAlphaFactor,
+            String shaderName) {
+        return createNativePipelineFromWgsl(nativePtr, vertexWgsl, fragmentWgsl,
+                vertexFormat, primitiveTopology, depthTestEnabled, depthWriteEnabled,
+                depthCompare, blendEnabled, blendSrcColorFactor, blendDstColorFactor,
+                blendSrcAlphaFactor, blendDstAlphaFactor, shaderName);
     }
 
     // Public access to native render pass methods for BassaltRenderPass

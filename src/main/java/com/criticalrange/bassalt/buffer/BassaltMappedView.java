@@ -51,6 +51,8 @@ public class BassaltMappedView implements GpuBuffer.MappedView {
         // CRITICAL: Ensure LITTLE_ENDIAN byte order for correct float/int data interpretation
         // This was previously set as a side effect of debug code, but is essential for correctness
         shadowBuffer.order(java.nio.ByteOrder.LITTLE_ENDIAN);
+
+        LOGGER.info("BassaltMappedView CREATED: bufferPtr={}, offset={}, size={}, write={}", buffer.getNativePtr(), offset, size, write);
     }
 
     @Override
@@ -118,6 +120,7 @@ public class BassaltMappedView implements GpuBuffer.MappedView {
                 data,
                 offset
             );
+            LOGGER.debug("BassaltMappedView CLOSED: bufferPtr={}, offset={}, dataSize={}", buffer.getNativePtr(), offset, data.length);
         }
 
         // Note: we don't close the buffer itself, just the mapped view

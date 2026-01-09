@@ -250,8 +250,8 @@ impl BindGroupBuilder {
                 _ => None,
             })
             .collect();
-        
-        log::debug!("build_with_layout: {} textures, {} samplers, {} uniforms available; layout expects {} bindings",
+
+        log::info!("build_with_layout: {} textures, {} samplers, {} uniforms available; layout expects {} bindings",
             texture_entries.len(), sampler_entries.len(), uniform_entries.len(), binding_layouts.len());
         
         for (i, layout) in binding_layouts.iter().enumerate() {
@@ -312,12 +312,14 @@ impl BindGroupBuilder {
                             resource: binding_model::BindingResource::TextureView(final_view_id),
                         });
                         texture_idx += 1;
-                        log::debug!("Bound texture to slot {}", layout_entry.binding);
+                        log::info!("Bound texture view to slot {} (view={:?})", layout_entry.binding, final_view_id);
                     } else {
                         log::warn!("No texture available for binding {}", layout_entry.binding);
                     }
                 }
                 BindingLayoutType::Sampler => {
+                    log::info!("Processing sampler binding at slot {} (sampler_idx={}, sampler_entries.len()={})",
+                        layout_entry.binding, sampler_idx, sampler_entries.len());
                     if sampler_idx < sampler_entries.len() {
                         let (_, sampler_id) = sampler_entries[sampler_idx];
                         bind_entries.push(binding_model::BindGroupEntry {
@@ -325,9 +327,10 @@ impl BindGroupBuilder {
                             resource: binding_model::BindingResource::Sampler(sampler_id),
                         });
                         sampler_idx += 1;
-                        log::debug!("Bound sampler to slot {}", layout_entry.binding);
+                        log::info!("Bound sampler to slot {} (sampler={:?})", layout_entry.binding, sampler_id);
                     } else {
-                        log::warn!("No sampler available for binding {}", layout_entry.binding);
+                        log::warn!("No sampler available for binding {} (sampler_idx={}, sampler_entries.len()={})",
+                            layout_entry.binding, sampler_idx, sampler_entries.len());
                     }
                 }
                 BindingLayoutType::UniformBuffer | BindingLayoutType::StorageBuffer => {

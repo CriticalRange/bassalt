@@ -36,4 +36,9 @@ public class BassaltTexture extends GpuTexture {
     public long getNativePtr() {
         return nativePtr;
     }
+
+    @Override
+    public String toString() {
+        return String.format("BassaltTexture[%s %dx%d handle=%d]", getLabel(), getWidth(0), getHeight(0), nativePtr);
+    }
 }

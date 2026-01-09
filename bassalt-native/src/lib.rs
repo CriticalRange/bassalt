@@ -30,6 +30,8 @@ mod msaa;
 
 use std::borrow::Cow;
 use std::sync::Arc;
+use std::sync::{RwLock, LazyLock};
+use std::collections::HashMap;
 use ::jni::JNIEnv;
 use ::jni::objects::{JByteArray, JClass, JString, JObject};
 use ::jni::sys::{jlong, jint, jboolean, jstring, jfloat, jlongArray};
@@ -44,6 +46,10 @@ use crate::resource_handles::HANDLES;
 
 /// Global context singleton
 static GLOBAL_CONTEXT: OnceCell<Arc<BasaltContext>> = OnceCell::new();
+
+/// Track the latest write offset for each buffer handle (for ring buffer fix)
+/// Minecraft caches GpuBufferSlice offsets, but ring buffers rotate, making cached offsets invalid
+static BUFFER_WRITE_OFFSETS: LazyLock<RwLock<HashMap<u64, u64>>> = LazyLock::new(|| RwLock::new(HashMap::new()));
 
 /// Initialize the Basalt renderer
 #[no_mangle]
@@ -563,6 +569,27 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_writ
         }
     };
 
+    // Log uniform buffer writes for debugging (offset 256+ are DynamicTransforms)
+    if offset >= 256 && data.len() >= 80 {
+        // ColorModulator is at offset 64 within DynamicTransforms (so offset+64 in buffer)
+        let cm_offset = 64;
+        if data.len() > cm_offset + 16 {
+            let r = data[cm_offset];
+            let g = data[cm_offset + 1];
+            let b = data[cm_offset + 2];
+            let a = data[cm_offset + 3];
+            log::info!("Writing uniform buffer: handle={}, offset={}, size={}, ColorModulator at +64: [{},{},{},{}]",
+                buffer_handle, offset, data.len(), r, g, b, a);
+        }
+    }
+
+    // Track the latest write offset for this buffer (for ring buffer uniform fix)
+    // Store the end of the written region (offset + size) as the "active" region
+    {
+        let mut offsets = BUFFER_WRITE_OFFSETS.write().unwrap();
+        offsets.insert(buffer_handle as u64, offset as u64 + data.len() as u64);
+    }
+
     if let Err(e) = device.write_buffer(buffer_id, offset as u64, &data) {
         let _ = env.throw_new("java/lang/RuntimeException", &format!("Failed to write buffer: {}", e));
     }
@@ -638,7 +665,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
                 wgt::TextureDimension::D2,
                 texture_format,
             );
-            log::info!("Created texture with handle {} ({}x{}x{}) format={:?}", handle, width, height, depth, texture_format);
+            log::info!("Created texture: handle={} texture_id={:?} ({}x{}x{}) format={:?}", handle, texture_id, width, height, depth, texture_format);
             handle as jlong
         }
         Err(e) => {
@@ -697,8 +724,8 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
             let handle = HANDLES.insert_texture_view(view_id, dimension, texture_info.id);
             // Register the view-to-texture mapping in context for reliable lookups
             device.context().register_texture_view(view_id, texture_info.id);
-            log::debug!("Created texture view with handle {} (dimension={:?}, layers={}) for texture {}",
-                       handle, dimension, texture_info.array_layers, texture_handle);
+            log::info!("Created texture view: handle={} view_id={:?} texture_id={:?} dimension={:?} layers={}",
+                       handle, view_id, texture_info.id, dimension, texture_info.array_layers);
             handle as jlong
         }
         Err(e) => {
@@ -927,7 +954,7 @@ fn create_vertex_buffer_layout(format_index: usize) -> Cow<'static, [wgpu_core::
             ]),
         }]),
         // 7 = POSITION_COLOR_TEX_TEX_NORMAL (position, color, uv0, uv2, normal - skips uv1)
-        // Color is UBYTE (unsigned bytes), not float! Total stride = 44 bytes
+        // Color is UBYTE (Unorm8x4) which auto-converts to vec4<f32> in shader! Total stride = 44 bytes
         7 => Cow::Owned(vec![wgpu_core::pipeline::VertexBufferLayout {
             array_stride: 44, // 12 + 4 + 8 + 8 + 12 = 44 bytes
             step_mode: wgt::VertexStepMode::Vertex,
@@ -938,7 +965,7 @@ fn create_vertex_buffer_layout(format_index: usize) -> Cow<'static, [wgpu_core::
                     shader_location: 0, // position
                 },
                 wgt::VertexAttribute {
-                    format: wgt::VertexFormat::Unorm8x4,  // UBYTE colors!
+                    format: wgt::VertexFormat::Unorm8x4,  // UBYTE colors (auto-converted to vec4<f32>)!
                     offset: 12,
                     shader_location: 1, // color
                 },
@@ -960,7 +987,7 @@ fn create_vertex_buffer_layout(format_index: usize) -> Cow<'static, [wgpu_core::
             ]),
         }]),
         // 8 = POSITION_COLOR_TEX_TEX (position, color, uv0, uv2 - no normal)
-        // Color is UBYTE (unsigned bytes), not float! Total stride = 32 bytes
+        // Color is UBYTE (Unorm8x4) which auto-converts to vec4<f32> in shader! Total stride = 32 bytes
         8 => Cow::Owned(vec![wgpu_core::pipeline::VertexBufferLayout {
             array_stride: 32, // 12 + 4 + 8 + 8 = 32 bytes
             step_mode: wgt::VertexStepMode::Vertex,
@@ -971,7 +998,7 @@ fn create_vertex_buffer_layout(format_index: usize) -> Cow<'static, [wgpu_core::
                     shader_location: 0, // position
                 },
                 wgt::VertexAttribute {
-                    format: wgt::VertexFormat::Unorm8x4,  // UBYTE colors!
+                    format: wgt::VertexFormat::Unorm8x4,  // UBYTE colors (auto-converted to vec4<f32>)!
                     offset: 12,
                     shader_location: 1, // color
                 },
@@ -1300,12 +1327,23 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
     blend_dst_color_factor: jint,
     blend_src_alpha_factor: jint,
     blend_dst_alpha_factor: jint,
+    shader_name: JString,
 ) -> jlong {
     // Validate device pointer
     if device_ptr == 0 {
         let _ = env.throw_new("java/lang/IllegalArgumentException", "Null device pointer");
         return 0;
     }
+
+    // Extract shader name from Java
+    let shader_name_str: String = if shader_name.is_null() {
+        "unknown".to_string()
+    } else {
+        match env.get_string(&shader_name) {
+            Ok(s) => s.into(),
+            Err(_) => "unknown".to_string(),
+        }
+    };
 
     // Get the device from the pointer - use the SAME device that was created during initialization
     let device = unsafe { &*(device_ptr as *const BasaltDevice) };
@@ -1497,9 +1535,10 @@ pub extern "system" fn Java_com_criticalrange_bassalt_backend_BassaltDevice_crea
         depth_format,
         depth_write_enabled != 0,  // Convert jboolean to bool
         depth_test_enabled != 0,   // Convert jboolean to bool
+        shader_name_str.clone(),
     );
-    log::debug!("Created render pipeline via cache with handle {} (bgl: {:?}, bindings: {}, depth: {:?})",
-               handle, bind_group_layout_id, num_bindings, depth_format);
+    log::debug!("Created render pipeline via cache with handle {} (shader: {}, bgl: {:?}, bindings: {}, depth: {:?})",
+               handle, shader_name_str, bind_group_layout_id, num_bindings, depth_format);
     handle as jlong
 }
 
@@ -1996,9 +2035,9 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
         } else {
             // Create default sampler: linear filter, clamp to edge
             match device.create_sampler(
-                3, // Clamp to edge (AddressMode::ClampToEdge = 3)
-                3, // Clamp to edge
-                3, // Clamp to edge
+                2, // Clamp to edge (AddressMode::ClampToEdge = 2)
+                2, // Clamp to edge
+                2, // Clamp to edge
                 1, // Linear (FilterMode::Linear = 1)
                 1, // Linear
                 0, // Mipmap mode: nearest (unused for GUI)
@@ -2020,6 +2059,74 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
         }
     };
 
+    // Create or get cached default white texture for missing texture bindings
+    // This is used when a shader expects a texture (like lightmap) but none is bound
+    static DEFAULT_WHITE_TEXTURE: AtomicU64 = AtomicU64::new(0);
+    static DEFAULT_WHITE_TEXTURE_VIEW: AtomicU64 = AtomicU64::new(0);
+    static DEFAULT_WHITE_TEXTURE_LOCK: Mutex<()> = Mutex::new(());
+
+    let (default_white_texture_id, default_white_view_id) = if DEFAULT_WHITE_TEXTURE.load(Ordering::Relaxed) != 0 {
+        (
+            HANDLES.get_texture(DEFAULT_WHITE_TEXTURE.load(Ordering::Relaxed)),
+            HANDLES.get_texture_view(DEFAULT_WHITE_TEXTURE_VIEW.load(Ordering::Relaxed))
+        )
+    } else {
+        let _lock = DEFAULT_WHITE_TEXTURE_LOCK.lock();
+        // Double-check after acquiring lock
+        if DEFAULT_WHITE_TEXTURE.load(Ordering::Relaxed) != 0 {
+            (
+                HANDLES.get_texture(DEFAULT_WHITE_TEXTURE.load(Ordering::Relaxed)),
+                HANDLES.get_texture_view(DEFAULT_WHITE_TEXTURE_VIEW.load(Ordering::Relaxed))
+            )
+        } else {
+            // Create a 1x1 white texture as fallback
+            match device.create_texture(1, 1, 1, 1, 0, 6) {
+                // 1x1x1, 1 mip level, FORMAT_RGBA8 (0 -> Bgra8Unorm), TEXTURE_BINDING | COPY_DST (6)
+                Ok(texture_id) => {
+                    // Write white pixel data to the texture
+                    let white_pixel: [u8; 4] = [255, 255, 255, 255]; // RGBA white
+                    match device.write_texture(texture_id, &white_pixel, 0, 0, 0, 0, 1, 1) {
+                        Ok(_) => {
+                            // Create a texture view
+                            match device.create_texture_view(texture_id, 1) {
+                                Ok((view_id, _dim)) => {
+                                    let tex_handle = HANDLES.insert_texture(
+                                        texture_id,
+                                        1, // array_layers
+                                        wgt::TextureDimension::D2,
+                                        wgt::TextureFormat::Bgra8Unorm
+                                    );
+                                    let view_handle = HANDLES.insert_texture_view(
+                                        view_id,
+                                        _dim,
+                                        texture_id
+                                    );
+                                    DEFAULT_WHITE_TEXTURE.store(tex_handle, Ordering::Relaxed);
+                                    DEFAULT_WHITE_TEXTURE_VIEW.store(view_handle, Ordering::Relaxed);
+                                    log::info!("Created default white texture {:?} (handle={}) and view {:?} (handle={}) for missing texture bindings",
+                                        texture_id, tex_handle, view_id, view_handle);
+                                    (Some(texture_id), Some(view_id))
+                                }
+                                Err(e) => {
+                                    log::warn!("Failed to create view for default white texture: {:?}", e);
+                                    (Some(texture_id), None)
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to write data to default white texture: {:?}", e);
+                            (Some(texture_id), None)
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("Failed to create default white texture: {:?}", e);
+                    (None, None)
+                }
+            }
+        }
+    };
+
     // Get pipeline's bind group layout if pipeline handle is provided
     let pipeline_layout = if pipeline_handle != 0 {
         HANDLES.get_render_pipeline_info(pipeline_handle as u64)
@@ -2029,6 +2136,9 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
 
     // Create bind group builder
     let mut builder = bind_group::BindGroupBuilder::new(context.clone(), device_id);
+
+    // Extract shader name for logging (if pipeline is set)
+    let shader_name = pipeline_layout.as_ref().map(|p| p.shader_name.as_str()).unwrap_or("unknown");
 
     // Add texture bindings using NAME-based lookup (matches shader reflection)
     if !texture_handles.is_null() && !texture_names.is_null() {
@@ -2119,26 +2229,39 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
                             })
                             .map(|layout| layout.binding);
 
-                        // Fallback: if no exact match, try sequential assignment
-                        // This maintains compatibility with older code paths
+                        // If no exact match, this is a shader/texture mismatch - FAIL FAST
                         if slot.is_none() {
-                            log::warn!("No name match for texture '{}' (shader doesn't have this variable), using sequential slot {}", mc_name, i as u32 * 2);
-                            // Use the current index to determine the binding slot
-                            // Each texture+sampler pair uses 2 slots (texture at even, sampler at odd)
-                            Some(i as u32 * 2)
+                            let shader_vars: Vec<&str> = pipeline_info.binding_layouts.iter()
+                                .filter(|l| l.ty == resource_handles::BindingLayoutType::Texture)
+                                .filter_map(|l| l.variable_name.as_deref())
+                                .collect();
+
+                            let msg = format!(
+                                "Texture '{}' not found in shader '{}'. Shader has these texture variables: {:?}. WGSL shader must declare this texture at the correct binding slot.",
+                                mc_name, pipeline_info.shader_name, shader_vars
+                            );
+                            log::error!("BINDING ERROR: {}", msg);
+                            let _ = env.throw_new("java/lang/IllegalArgumentException", &msg);
+                            return 0;
                         } else {
-                            log::info!("MATCHED texture '{}' to slot {}", mc_name, slot.unwrap());
+                            log::info!("MATCHED texture '{}' to slot {} [shader: {}]", mc_name, slot.unwrap(), shader_name);
                             slot
                         }
                     } else {
-                        // No pipeline info or no name provided - use sequential assignment
-                        // Each texture+sampler pair uses 2 slots (texture at even, sampler at odd)
-                        Some(i as u32 * 2)
+                        // No pipeline info - this shouldn't happen with proper rendering
+                        let msg = format!(
+                            "Cannot bind texture '{}' - no pipeline layout available. Ensure setPipeline() is called before bindTexture().",
+                            texture_name_log.as_deref().unwrap_or("?")
+                        );
+                        log::error!("{}", msg);
+                        let _ = env.throw_new("java/lang/IllegalStateException", &msg);
+                        return 0;
                     };
 
                     if let Some(slot) = binding_slot {
                         builder = builder.add_texture(slot, view_info.id, sampler_id, view_info.dimension, view_info.texture_id);
-                        log::debug!("Bound texture '{}' to slot {}", texture_name_log.unwrap_or_else(|| format!("#{}", i)), slot);
+                        log::info!("Bound texture '{}' to slot {} [shader: {}] (view={:?}, sampler={:?})",
+                            texture_name_log.unwrap_or_else(|| format!("#{}", i)), slot, shader_name, view_info.id, sampler_id);
                     } else {
                         log::warn!("Failed to find binding slot for texture '{}'", texture_name_log.unwrap_or_else(|| format!("#{}", i)));
                     }
@@ -2146,40 +2269,12 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
             }
         }
     } else if !texture_handles.is_null() {
-        // Fallback: no texture names provided, use sequential ordering
-        let tex_array: ::jni::objects::JPrimitiveArray<i64> = texture_handles.into();
-        let samp_array: ::jni::objects::JPrimitiveArray<i64> = sampler_handles.into();
-
-        let texture_count = match env.get_array_length(&tex_array) {
-            Ok(len) => len as usize,
-            Err(_) => 0,
-        };
-
-        let mut texture_binding_slot = 0u32;
-        for i in 0..texture_count {
-            let mut tex_handle_buf = [0i64; 1];
-            if env.get_long_array_region(&tex_array, i as i32, &mut tex_handle_buf).is_ok() {
-                let tex_handle = tex_handle_buf[0];
-                if tex_handle != 0 {
-                    if let Some(view_info) = HANDLES.get_texture_view_info(tex_handle as u64) {
-                        let mut samp_handle_buf = [0i64; 1];
-                        let sampler_id = if env.get_long_array_region(&samp_array, i as i32, &mut samp_handle_buf).is_ok() {
-                            let samp_handle = samp_handle_buf[0];
-                            if samp_handle != 0 {
-                                HANDLES.get_sampler(samp_handle as u64)
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        };
-
-                        builder = builder.add_texture(texture_binding_slot, view_info.id, sampler_id, view_info.dimension, view_info.texture_id);
-                        texture_binding_slot += if sampler_id.is_some() { 2 } else { 1 };
-                    }
-                }
-            }
-        }
+        // Sequential binding without texture names is NOT SUPPORTED
+        // Name-based binding is required to ensure textures match shader expectations
+        let msg = "Texture binding without texture names is not supported. Use the bindTexture(name, ...) API that provides texture names for proper shader matching.";
+        log::error!("{}", msg);
+        let _ = env.throw_new("java/lang/IllegalArgumentException", msg);
+        return 0;
     }
 
     // Add uniform buffer bindings using NAME-based lookup
@@ -2220,7 +2315,18 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
                     Err(_) => None,
                 };
 
-                if let (Some(buffer_info), Some(mc_name)) = (HANDLES.get_buffer_info(unif_handle as u64), uniform_name) {
+                // Log buffer lookup for debugging
+                let buffer_info_result = HANDLES.get_buffer_info(unif_handle as u64);
+                log::info!("UNIFORM BINDING: name='{}', handle={}, buffer_info={:?}",
+                    uniform_name.as_ref().map_or("null", |s| s.as_str()),
+                    unif_handle,
+                    buffer_info_result.as_ref().map(|info| (info.id, info.size))
+                );
+                if buffer_info_result.is_none() {
+                    log::warn!("BUFFER LOOKUP FAILED: handle={} has no buffer info in HANDLES map", unif_handle);
+                }
+
+                if let (Some(buffer_info), Some(mc_name)) = (buffer_info_result, uniform_name) {
                     // Find the correct binding slot by matching the uniform name
                     // Use wgpu-mc style direct name matching
                     let binding_slot = if let Some(ref pipeline_info) = pipeline_layout {
@@ -2291,7 +2397,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
                         }
 
                         if slot.is_none() {
-                            log::warn!("No binding slot found for uniform '{}' (pipeline has {} bindings)",
+                            log::debug!("No binding slot found for uniform '{}' (pipeline has {} bindings)",
                                        mc_name, pipeline_info.binding_layouts.len());
                         }
 
@@ -2306,7 +2412,29 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
                         let mut size_buf = [0i64; 1];
 
                         let offset = if env.get_long_array_region(&offsets_array, i as i32, &mut offset_buf).is_ok() {
-                            offset_buf[0] as u64
+                            let slice_offset = offset_buf[0] as u64;
+
+                            // RING BUFFER FIX: Minecraft's DynamicUniformStorage caches slice offsets across frames,
+                            // but the ring buffer rotates, making cached offsets stale.
+                            // For DynamicTransforms (handles 1-3), if slice_offset is 0 but we've written to offset 256,
+                            // use the ring buffer's current offset instead.
+                            let is_ring_buffer_uniform = unif_handle >= 1 && unif_handle <= 6;
+                            if is_ring_buffer_uniform && slice_offset == 0 {
+                                // Check if we've written to offset 256 (second slot in ring buffer)
+                                let offsets = BUFFER_WRITE_OFFSETS.read().unwrap();
+                                if let Some(&write_end) = offsets.get(&(unif_handle as u64)) {
+                                    if write_end > 256 {
+                                        log::info!("RING BUFFER FIX: handle={} slice_offset=0 but data at offset=256, using 256", unif_handle);
+                                        256
+                                    } else {
+                                        slice_offset
+                                    }
+                                } else {
+                                    slice_offset
+                                }
+                            } else {
+                                slice_offset
+                            }
                         } else {
                             0
                         };
@@ -2321,7 +2449,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
                                   mc_name, slot, offset, size);
                         builder = builder.add_uniform_buffer(slot, buffer_info.id, offset, size);
                     } else {
-                        log::warn!("Failed to map uniform '{}' to any binding slot", mc_name);
+                        log::debug!("Failed to map uniform '{}' to any binding slot", mc_name);
                     }
                 }
             }
@@ -2355,8 +2483,8 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
     }
     
     let result = if let Some(ref pipeline_info) = pipeline_layout {
-        log::debug!("Creating bind group with pipeline layout {:?} ({} bindings)", 
-                   pipeline_info.bind_group_layout_id, pipeline_info.binding_layouts.len());
+        log::debug!("Creating bind group with pipeline layout {:?} ({} bindings) [shader: {}]",
+                   pipeline_info.bind_group_layout_id, pipeline_info.binding_layouts.len(), pipeline_info.shader_name);
         builder.build_with_layout(pipeline_info.bind_group_layout_id, &pipeline_info.binding_layouts)
     } else {
         log::debug!("Creating bind group with dynamic layout (no pipeline specified)");
@@ -2720,6 +2848,8 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltCommandEnc
     height: jint,
     _format: jint,
 ) {
+    log::info!("JNI: writeToTexture0 called: handle={} size={}x{} mip={}", texture_handle, width, height, mip_level);
+
     if device_ptr == 0 || texture_handle == 0 {
         let _ = env.throw_new("java/lang/IllegalArgumentException", "Null pointer");
         return;
@@ -2745,6 +2875,15 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltCommandEnc
         }
     };
 
+    // DEBUG: Print first 16 bytes of texture data to verify
+    let preview: Vec<u8> = data_vec.iter().take(16).copied().collect();
+    let all_zeros = data_vec.iter().all(|&b| b == 0);
+    log::info!("Calling device.write_texture: texture_id={:?}, data_len={}, mip={}, dest=({},{})", texture_id, data_vec.len(), mip_level, dest_x, dest_y);
+    log::info!("Texture data preview (first 16 bytes): {:?}", preview);
+    if all_zeros && data_vec.len() > 16 {
+        log::warn!("Texture data is ALL ZEROS! NativeImage might be uninitialized or zero-initialized!");
+    }
+
     if let Err(e) = device.write_texture(
         texture_id,
         &data_vec,
@@ -2757,7 +2896,7 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltCommandEnc
     ) {
         let _ = env.throw_new("java/lang/RuntimeException", &format!("Failed to write texture: {}", e));
     } else {
-        log::debug!("Wrote {}x{} texture data ({} bytes) to texture {:?} at ({}, {}, layer={})",
+        log::info!("SUCCESS: Wrote {}x{} texture data ({} bytes) to texture {:?} at ({}, {}, layer={})",
                   width, height, data_vec.len(), texture_id, dest_x, dest_y, _depth_or_layer);
     }
 }

@@ -78,6 +78,13 @@ public class BassaltRenderPass implements RenderPass {
     @Override
     public void setPipeline(RenderPipeline pipeline) {
         checkClosed();
+
+        // Only clear TEXTURE bindings if the pipeline actually changes
+        // Uniforms persist across pipeline changes (matching OpenGL behavior)
+        // Textures must be rebound per draw call, so clearing them prevents wrong textures from leaking
+        if (this.currentPipeline != null && !this.currentPipeline.equals(pipeline)) {
+            textureBindings.clear();
+        }
         this.currentPipeline = pipeline;
 
         // Get the compiled pipeline from the device and call native setPipeline
@@ -131,6 +138,7 @@ public class BassaltRenderPass implements RenderPass {
 
         if (value.buffer() instanceof BassaltBuffer) {
             long bufferPtr = ((BassaltBuffer) value.buffer()).getNativePtr();
+            LOGGER.debug("setUniform: name='{}', bufferPtr={}, offset={}, length={}", name, bufferPtr, value.offset(), value.length());
             uniformBindings.put(name, new UniformBinding(bufferPtr, value.offset(), value.length()));
         }
     }

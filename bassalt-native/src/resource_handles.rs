@@ -95,6 +95,8 @@ pub struct RenderPipelineInfo {
     pub depth_write_enabled: bool,
     /// Whether this pipeline has depth testing enabled
     pub depth_test_enabled: bool,
+    /// Shader/pipeline name for debugging
+    pub shader_name: String,
 }
 
 
@@ -256,6 +258,7 @@ impl ResourceHandleStore {
         depth_format: PipelineDepthFormat,
         depth_write_enabled: bool,
         depth_test_enabled: bool,
+        shader_name: String,
     ) -> u64 {
         let handle = self.next();
         let info = RenderPipelineInfo {
@@ -265,6 +268,7 @@ impl ResourceHandleStore {
             depth_format,
             depth_write_enabled,
             depth_test_enabled,
+            shader_name,
         };
         self.render_pipelines.write().insert(handle, info);
         handle

@@ -272,8 +272,8 @@ impl BasaltDevice {
         let pl_desc = wgpu_core::binding_model::PipelineLayoutDescriptor {
             label: Some(Cow::Borrowed("Bassalt Shared Pipeline Layout")),
             bind_group_layouts: Cow::Owned(vec![bgl_id]),
-            // Immediates for per-draw data (128 bytes = 2 mat4x4)
-            immediate_size: 128,
+            // No immediates - using uniform buffers via bind groups instead
+            immediate_size: 0,
         };
 
         let (pl_id, pl_error) = global.device_create_pipeline_layout(device_id, &pl_desc, None);
@@ -1475,8 +1475,8 @@ impl BasaltDevice {
                 padded_data.extend_from_slice(row_data);
 
                 // Add padding to reach 256-byte boundary
+                // Note: Last row doesn't need padding since there's no next row to stride to
                 if row < height - 1 {
-                    // Don't pad the last row (not needed)
                     padded_data.extend(std::iter::repeat(0).take(padding_bytes));
                 }
             }
@@ -2067,6 +2067,7 @@ impl BasaltDevice {
         // =============================================================
         // Minecraft textures use RGBA byte order (Red=0, Green=1, Blue=2, Alpha=3)
         // Most GPUs prefer BGRA for better performance, so the swapchain uses BGRA
+        //
         // To match these, we need to create textures in BGRA format when MC sends RGBA data
         //
         // Format mapping:

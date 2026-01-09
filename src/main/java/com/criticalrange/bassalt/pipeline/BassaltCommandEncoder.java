@@ -26,6 +26,8 @@ import java.util.OptionalLong;
 import java.util.function.BiConsumer;
 import java.util.function.Supplier;
 
+import org.lwjgl.system.MemoryUtil;
+
 import com.criticalrange.bassalt.sync.BassaltFence;
 import com.criticalrange.bassalt.sync.BassaltQuery;
 
@@ -141,21 +143,86 @@ public class BassaltCommandEncoder implements CommandEncoder {
         int sourceX,
         int sourceY
     ) {
-        // Extract pixel data from NativeImage
-        byte[] pixels = new byte[width * height * 4]; // Assume RGBA8 for now
-        for (int y = 0; y < height; y++) {
-            for (int x = 0; x < width; x++) {
-                int srcX = sourceX + x;
-                int srcY = sourceY + y;
-                int abgr = source.getPixel(srcX, srcY);
+        // Get the native memory pointer from NativeImage (same approach as OpenGL backend)
+        long nativePointer = source.getPointer();
+        int sourceWidth = source.getWidth();
+        int sourceHeight = source.getHeight();
+        int components = source.format().components();
 
-                // Convert ABGR to RGBA
-                int offset = (y * width + x) * 4;
-                pixels[offset] = (byte) ((abgr >> 0) & 0xFF);  // R
-                pixels[offset + 1] = (byte) ((abgr >> 8) & 0xFF);  // G
-                pixels[offset + 2] = (byte) ((abgr >> 16) & 0xFF); // B
-                pixels[offset + 3] = (byte) ((abgr >> 24) & 0xFF); // A
+        // Validate native pointer - if 0, the NativeImage was closed or not allocated
+        if (nativePointer == 0) {
+            LOGGER.error("NativeImage pointer is NULL! Image may be closed. destination={}, size={}x{}",
+                    destination, sourceWidth, sourceHeight);
+            return;
+        }
+
+        // Calculate total size and create a ByteBuffer view into native memory
+        int bytesPerPixel = components;
+        int rowStride = sourceWidth * bytesPerPixel;
+
+        // For subregion copies, we need to extract just the needed pixels
+        // Output is BGRA format (what wgpu/WebGPU expects)
+        byte[] pixels = new byte[width * height * 4];
+
+        // Access native memory directly using MemoryUtil
+        // NativeImage stores pixels in RGBA format: [R, G, B, A] at addresses [+0, +1, +2, +3]
+        // wgpu textures are BGRA format, so we need to swap R and B channels
+        boolean hasNonZero = false;
+        for (int y = 0; y < height; y++) {
+            int srcRowOffset = ((sourceY + y) * sourceWidth + sourceX) * bytesPerPixel;
+            int dstRowOffset = y * width * 4;
+
+            for (int x = 0; x < width; x++) {
+                long pixelAddr = nativePointer + srcRowOffset + (x * bytesPerPixel);
+                int dstOffset = dstRowOffset + (x * 4);
+
+                if (components == 4) {
+                    // Source: RGBA, Destination: BGRA - swap R and B
+                    byte r = MemoryUtil.memGetByte(pixelAddr);     // R
+                    byte g = MemoryUtil.memGetByte(pixelAddr + 1); // G
+                    byte b = MemoryUtil.memGetByte(pixelAddr + 2); // B
+                    byte a = MemoryUtil.memGetByte(pixelAddr + 3); // A
+                    if (r != 0 || g != 0 || b != 0 || a != 0) hasNonZero = true;
+                    pixels[dstOffset]     = b; // B
+                    pixels[dstOffset + 1] = g; // G
+                    pixels[dstOffset + 2] = r; // R
+                    pixels[dstOffset + 3] = a; // A
+                } else if (components == 3) {
+                    // RGB format -> BGRA
+                    byte r = MemoryUtil.memGetByte(pixelAddr);     // R
+                    byte g = MemoryUtil.memGetByte(pixelAddr + 1); // G
+                    byte b = MemoryUtil.memGetByte(pixelAddr + 2); // B
+                    if (r != 0 || g != 0 || b != 0) hasNonZero = true;
+                    pixels[dstOffset]     = b; // B
+                    pixels[dstOffset + 1] = g; // G
+                    pixels[dstOffset + 2] = r; // R
+                    pixels[dstOffset + 3] = (byte) 0xFF; // Opaque alpha
+                } else if (components == 1) {
+                    // Luminance format - replicate to BGR
+                    byte lum = MemoryUtil.memGetByte(pixelAddr);
+                    if (lum != 0) hasNonZero = true;
+                    pixels[dstOffset]     = lum; // B
+                    pixels[dstOffset + 1] = lum; // G
+                    pixels[dstOffset + 2] = lum; // R
+                    pixels[dstOffset + 3] = (byte) 0xFF;
+                } else if (components == 2) {
+                    // Luminance-Alpha format -> BGRA
+                    byte lum = MemoryUtil.memGetByte(pixelAddr);
+                    byte alpha = MemoryUtil.memGetByte(pixelAddr + 1);
+                    if (lum != 0 || alpha != 0) hasNonZero = true;
+                    pixels[dstOffset]     = lum; // B
+                    pixels[dstOffset + 1] = lum; // G
+                    pixels[dstOffset + 2] = lum; // R
+                    pixels[dstOffset + 3] = alpha; // A
+                }
             }
+        }
+
+        if (!hasNonZero) {
+            // Some textures (overlays, error textures) may be created with zero data intentionally
+            // or may be populated later. This is not necessarily an error.
+            LOGGER.debug("Texture upload has ALL ZERO data - this may be intentional for overlays/placeholder textures. destination={}, size={}x{}, format={}, nativePtr=0x{}",
+                    destination, width, height, source.format(), Long.toHexString(nativePointer));
         }
 
         long texturePtr = ((BassaltTexture) destination).getNativePtr();
@@ -163,6 +230,7 @@ public class BassaltCommandEncoder implements CommandEncoder {
             mipLevel, depthOrLayer, destX, destY, width, height,
             destination.getFormat().ordinal());
     }
+
 
     @Override
     public void writeToTexture(
