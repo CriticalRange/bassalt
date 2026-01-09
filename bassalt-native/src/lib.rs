@@ -1978,6 +1978,48 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
     let context = device.context().clone();
     let device_id = device.id();
 
+    // Create or get cached default sampler for textures that don't have one
+    // Default sampler: linear filtering, clamp to edge (good for GUI textures)
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use parking_lot::Mutex;
+
+    static DEFAULT_SAMPLER_HANDLE: AtomicU64 = AtomicU64::new(0);
+    static DEFAULT_SAMPLER_LOCK: Mutex<()> = Mutex::new(());
+
+    let default_sampler_id = if DEFAULT_SAMPLER_HANDLE.load(Ordering::Relaxed) != 0 {
+        HANDLES.get_sampler(DEFAULT_SAMPLER_HANDLE.load(Ordering::Relaxed))
+    } else {
+        let _lock = DEFAULT_SAMPLER_LOCK.lock();
+        // Double-check after acquiring lock
+        if DEFAULT_SAMPLER_HANDLE.load(Ordering::Relaxed) != 0 {
+            HANDLES.get_sampler(DEFAULT_SAMPLER_HANDLE.load(Ordering::Relaxed))
+        } else {
+            // Create default sampler: linear filter, clamp to edge
+            match device.create_sampler(
+                3, // Clamp to edge (AddressMode::ClampToEdge = 3)
+                3, // Clamp to edge
+                3, // Clamp to edge
+                1, // Linear (FilterMode::Linear = 1)
+                1, // Linear
+                0, // Mipmap mode: nearest (unused for GUI)
+                0.0, // lod_min_clamp
+                32.0, // lod_max_clamp
+                1, // max_anisotropy
+            ) {
+                Ok(id) => {
+                    let handle = HANDLES.insert_sampler(id);
+                    DEFAULT_SAMPLER_HANDLE.store(handle, Ordering::Relaxed);
+                    log::info!("Created default sampler {:?} (handle={}) for textures without explicit sampler", id, handle);
+                    Some(id)
+                }
+                Err(e) => {
+                    log::warn!("Failed to create default sampler: {:?}", e);
+                    None
+                }
+            }
+        }
+    };
+
     // Get pipeline's bind group layout if pipeline handle is provided
     let pipeline_layout = if pipeline_handle != 0 {
         HANDLES.get_render_pipeline_info(pipeline_handle as u64)
@@ -2035,15 +2077,29 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
                         if samp_handle != 0 {
                             HANDLES.get_sampler(samp_handle as u64)
                         } else {
-                            None
+                            // Use default sampler when none provided
+                            if default_sampler_id.is_some() {
+                                log::debug!("Texture '{}' has no sampler, using default sampler",
+                                    texture_name_log.as_ref().map_or("unnamed", |s| s.as_str()));
+                            }
+                            default_sampler_id
                         }
                     } else {
-                        None
+                        default_sampler_id
                     };
 
                     // Find the correct binding slot by matching the texture name
                     let binding_slot = if let (Some(pipeline_info), Some(mc_name)) = (pipeline_layout.as_ref(), texture_name) {
                         let mc_name_lower = mc_name.to_lowercase();
+
+                        // DEBUG: Log what texture name MC is sending and what the shader expects
+                        log::info!("createBindGroup0: MC sending texture name '{}'", mc_name);
+                        for layout in pipeline_info.binding_layouts.iter() {
+                            if layout.ty == resource_handles::BindingLayoutType::Texture {
+                                log::info!("  Shader expects texture at slot {}: var_name={:?}",
+                                    layout.binding, layout.variable_name);
+                            }
+                        }
 
                         // Try to match texture name to shader binding slot
                         let slot = pipeline_info.binding_layouts.iter()
@@ -2066,11 +2122,12 @@ pub extern "system" fn Java_com_criticalrange_bassalt_pipeline_BassaltRenderPass
                         // Fallback: if no exact match, try sequential assignment
                         // This maintains compatibility with older code paths
                         if slot.is_none() {
-                            log::debug!("No name match for texture '{}', using sequential assignment", mc_name);
+                            log::warn!("No name match for texture '{}' (shader doesn't have this variable), using sequential slot {}", mc_name, i as u32 * 2);
                             // Use the current index to determine the binding slot
                             // Each texture+sampler pair uses 2 slots (texture at even, sampler at odd)
                             Some(i as u32 * 2)
                         } else {
+                            log::info!("MATCHED texture '{}' to slot {}", mc_name, slot.unwrap());
                             slot
                         }
                     } else {
